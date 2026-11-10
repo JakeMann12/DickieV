@@ -5,8 +5,8 @@
 #include <hd44780.h>
 #include <hd44780ioClass/hd44780_pinIO.h>
 
-const char* WIFI_SSID = "Jake";
-const char* WIFI_PASS = "JakeRocks";     //"M0n@rchQu@ntum!";
+const char* WIFI_SSID = "SpectrumSetup-87";//"Jake";
+const char* WIFI_PASS = "inventremedy901";//"JakeRocks";     //"M0n@rchQu@ntum!";
 const char* HOST = "site.api.espn.com";
 const char* PATH = "/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups=50&limit=400";
 const char* TEAM = "DUKE";   // ESPN team abbreviation
@@ -79,6 +79,10 @@ void setup() {
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("WiFi up");
+  lcd.print("LAL 87  BOS 84");
+  lcd.setCursor(0, 1);
+  lcd.print("Q3  4:12");
+  delay(1555000);
 }
 
 void loop() {
