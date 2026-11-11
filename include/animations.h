@@ -5,6 +5,9 @@
 #include <hd44780ioClass/hd44780_pinIO.h>
 #include "phrases.h"
 
+// The HD44780 only has 8 custom-character slots (0-7). Anything above that
+// silently wraps (8 -> 0, 9 -> 1 ...), which is why the old devil sprite
+// stomped on the runner sprites and looked like garbage.
 enum {
   RUN_A,
   RUN_B,
@@ -52,39 +55,332 @@ inline void centeredText(hd44780_pinIO& lcd, uint8_t row, const char* s) {
   lcd.print(s);
 }
 
-inline void letterRevealAnimation(hd44780_pinIO& lcd, const char* word,
-                                  uint16_t letterMs = 350) {
-  String w(word);
-  uint8_t len = w.length();
-  uint8_t startCol = (len >= 16) ? 0 : (16 - len) / 2;
+// ============================================================================
+//  BIG 2x2 LETTERS + DEVIL SPRITE
+// ============================================================================
+//  Every glyph is a 10 px wide x 16 px tall bitmap = 2x2 LCD cells.
+//  16 rows per glyph, bit 9 (leftmost digit) = leftmost pixel. 1 = lit.
+//  At runtime each bitmap is sliced into four 5x8 tiles (TL, TR, BL, BR) and
+//  loaded into CGRAM. Identical tiles share a slot; blank tiles use ' ' and
+//  solid tiles use the built-in 0xFF block, so they cost no slots at all.
+//
+//  Slot budget (only 8 exist):
+//    - DUKE / GTHC: letters are shown two at a time (4 + 4 tiles = 8 slots)
+//    - DDMF: devil uses slots 0-3, letters get 4-7, so one letter (or the
+//      double D, which shares tiles) at a time
+// ============================================================================
+
+static const uint16_t BIG_D[16] = {
+  0b1111111100, 0b1111111110, 0b1111111111, 0b1110000111,
+  0b1110000111, 0b1110000111, 0b1110000111, 0b1110000111,
+  0b1110000111, 0b1110000111, 0b1110000111, 0b1110000111,
+  0b1110000111, 0b1111111111, 0b1111111110, 0b1111111100
+};
+
+static const uint16_t BIG_U[16] = {
+  0b1110000111, 0b1110000111, 0b1110000111, 0b1110000111,
+  0b1110000111, 0b1110000111, 0b1110000111, 0b1110000111,
+  0b1110000111, 0b1110000111, 0b1110000111, 0b1110000111,
+  0b1110000111, 0b1111111111, 0b0111111110, 0b0011111100
+};
+
+static const uint16_t BIG_K[16] = {
+  0b1110000111, 0b1110000111, 0b1110001110, 0b1110011100,
+  0b1110111000, 0b1111110000, 0b1111110000, 0b1111100000,
+  0b1111100000, 0b1111110000, 0b1111110000, 0b1110111000,
+  0b1110011100, 0b1110001110, 0b1110000111, 0b1110000111
+};
+
+static const uint16_t BIG_E[16] = {
+  0b1111111111, 0b1111111111, 0b1111111111, 0b1110000000,
+  0b1110000000, 0b1110000000, 0b1111111100, 0b1111111100,
+  0b1111111100, 0b1110000000, 0b1110000000, 0b1110000000,
+  0b1110000000, 0b1111111111, 0b1111111111, 0b1111111111
+};
+
+static const uint16_t BIG_M[16] = {
+  0b1111001111, 0b1111001111, 0b1110110111, 0b1110110111,
+  0b1110110111, 0b1110110111, 0b1110110111, 0b1110110111,
+  0b1110110111, 0b1110110111, 0b1110000111, 0b1110000111,
+  0b1110000111, 0b1110000111, 0b1110000111, 0b1110000111
+};
+
+static const uint16_t BIG_F[16] = {
+  0b1111111111, 0b1111111111, 0b1111111111, 0b1110000000,
+  0b1110000000, 0b1110000000, 0b1111111100, 0b1111111100,
+  0b1111111100, 0b1110000000, 0b1110000000, 0b1110000000,
+  0b1110000000, 0b1110000000, 0b1110000000, 0b1110000000
+};
+
+static const uint16_t BIG_G[16] = {
+  0b0111111110, 0b1111111111, 0b1111111111, 0b1110000111,
+  0b1110000111, 0b1110000000, 0b1110000000, 0b1110000000,
+  0b1110011111, 0b1110011111, 0b1110000111, 0b1110000111,
+  0b1110000111, 0b1111111111, 0b1111111111, 0b0111111110
+};
+
+static const uint16_t BIG_T[16] = {
+  0b1111111111, 0b1111111111, 0b1111111111, 0b0001111000,
+  0b0001111000, 0b0001111000, 0b0001111000, 0b0001111000,
+  0b0001111000, 0b0001111000, 0b0001111000, 0b0001111000,
+  0b0001111000, 0b0001111000, 0b0001111000, 0b0001111000
+};
+
+static const uint16_t BIG_H[16] = {
+  0b1110000111, 0b1110000111, 0b1110000111, 0b1110000111,
+  0b1110000111, 0b1110000111, 0b1111111111, 0b1111111111,
+  0b1111111111, 0b1110000111, 0b1110000111, 0b1110000111,
+  0b1110000111, 0b1110000111, 0b1110000111, 0b1110000111
+};
+
+static const uint16_t BIG_C[16] = {
+  0b0111111110, 0b1111111111, 0b1111111111, 0b1110000111,
+  0b1110000000, 0b1110000000, 0b1110000000, 0b1110000000,
+  0b1110000000, 0b1110000000, 0b1110000000, 0b1110000000,
+  0b1110000111, 0b1111111111, 0b1111111111, 0b0111111110
+};
+
+// Duke Blue Devil, facing right like the logo (horn, pointed ear, angry eye slit,
+// grin, goatee). Drawn as the FACE, not the big "D" behind it.
+//   ....#.....   horn
+//   ...##.....
+//   ..####....
+//   .#######..
+//   ##.######.   ear tip, gap, brow
+//   ##.###..#.   eye
+//   ###.#..##.
+//   .##.######   nose starts
+//   ...#######   nose tip
+//   ...######.
+//   ...###..#.   grin
+//   ...######.
+//   ....#####.   chin
+//   ....####..   goatee
+//   .....###..
+//   ......##..
+static const uint16_t BIG_DEVIL[16] = {
+  0b0000010000, 0b0000110000, 0b0001111000, 0b0111111100,
+  0b1101111110, 0b1101110010, 0b1110100110, 0b0110111111,
+  0b0001111111, 0b0001111110, 0b0001110010, 0b0001111110,
+  0b0000111110, 0b0000111100, 0b0000011100, 0b0000001100
+};
+
+inline const uint16_t* bigGlyph(char c) {
+  switch (c) {
+    case 'D': return BIG_D;
+    case 'U': return BIG_U;
+    case 'K': return BIG_K;
+    case 'E': return BIG_E;
+    case 'M': return BIG_M;
+    case 'F': return BIG_F;
+    case 'G': return BIG_G;
+    case 'T': return BIG_T;
+    case 'H': return BIG_H;
+    case 'C': return BIG_C;
+    default:  return nullptr;
+  }
+}
+
+inline uint16_t reverse10(uint16_t v) {
+  uint16_t r = 0;
+  for (uint8_t i = 0; i < 10; i++) {
+    r = (r << 1) | (v & 1);
+    v >>= 1;
+  }
+  return r;
+}
+
+// Cut one 5x8 tile out of a 10x16 bitmap. tileCol/tileRow are 0 or 1.
+inline void sliceTile(const uint16_t* bmp, bool mirror, uint8_t tileCol, uint8_t tileRow, uint8_t out[8]) {
+  for (uint8_t r = 0; r < 8; r++) {
+    uint16_t row = bmp[tileRow * 8 + r];
+    if (mirror) row = reverse10(row);
+    out[r] = tileCol ? (row & 0x1F) : ((row >> 5) & 0x1F);
+  }
+}
+
+// Returns the character code to print for this tile, loading it into CGRAM if needed.
+inline uint8_t tileToCode(hd44780_pinIO& lcd, const uint8_t tile[8],
+                          uint8_t slots[8][8], uint8_t& used, uint8_t base) {
+  bool blank = true, full = true;
+  for (uint8_t r = 0; r < 8; r++) {
+    if (tile[r] != 0) blank = false;
+    if (tile[r] != 0x1F) full = false;
+  }
+  if (blank) return ' ';
+  if (full) return 0xFF;
+
+  for (uint8_t s = base; s < used; s++) {
+    if (memcmp(slots[s], tile, 8) == 0) return s;
+  }
+  if (used >= 8) return ' ';  // out of slots, degrade gracefully
+
+  memcpy(slots[used], tile, 8);
+  lcd.createChar(used, slots[used]);
+  return used++;
+}
+
+struct BigChunk {
+  uint8_t n;          // letters in this chunk (max 2)
+  uint8_t code[2][4]; // per letter: TL, TR, BL, BR
+};
+
+// Loads the tiles for up to 2 letters into CGRAM slots starting at `base`.
+inline BigChunk loadChunk(hd44780_pinIO& lcd, const char* letters, uint8_t base) {
+  BigChunk ch;
+  memset(&ch, 0, sizeof(ch));
+  uint8_t slots[8][8];
+  uint8_t used = base;
+
+  for (uint8_t i = 0; letters[i] && ch.n < 2; i++) {
+    const uint16_t* g = bigGlyph(letters[i]);
+    if (!g) continue;
+    for (uint8_t t = 0; t < 4; t++) {
+      uint8_t tile[8];
+      sliceTile(g, false, t & 1, t >> 1, tile);
+      ch.code[ch.n][t] = tileToCode(lcd, tile, slots, used, base);
+    }
+    ch.n++;
+  }
+  return ch;
+}
+
+// Devil always lives in slots 0-3 (TL, TR, BL, BR).
+inline void loadDevil(hd44780_pinIO& lcd, bool mirrored) {
+  for (uint8_t t = 0; t < 4; t++) {
+    uint8_t tile[8];
+    sliceTile(BIG_DEVIL, mirrored, t & 1, t >> 1, tile);
+    lcd.createChar(t, tile);
+  }
+}
+
+inline void drawCell(hd44780_pinIO& lcd, int col, uint8_t row, uint8_t code) {
+  if (col < 0 || col > 15) return;  // clip so groups can slide on/off screen
+  lcd.setCursor(col, row);
+  lcd.write(code);
+}
+
+inline void blankColumn(hd44780_pinIO& lcd, int col) {
+  drawCell(lcd, col, 0, ' ');
+  drawCell(lcd, col, 1, ' ');
+}
+
+inline int chunkWidth(const BigChunk& ch) {
+  return ch.n ? ch.n * 3 - 1 : 0;  // 2 cols per letter + 1 col gap
+}
+
+inline int groupWidth(const BigChunk& ch, bool devil) {
+  return chunkWidth(ch) + (devil ? 3 : 0);  // devil = 2 cols + 1 col gap
+}
+
+// Draws [devil][gap][letters] or [letters][gap][devil] with its left edge at x.
+inline void drawGroup(hd44780_pinIO& lcd, int x, const BigChunk& ch, bool devil, bool devilRight) {
+  int chunkX = (devil && !devilRight) ? x + 3 : x;
+
+  for (uint8_t i = 0; i < ch.n; i++) {
+    int cx = chunkX + i * 3;
+    drawCell(lcd, cx,     0, ch.code[i][0]);
+    drawCell(lcd, cx + 1, 0, ch.code[i][1]);
+    drawCell(lcd, cx,     1, ch.code[i][2]);
+    drawCell(lcd, cx + 1, 1, ch.code[i][3]);
+  }
+
+  if (devil) {
+    int dx = devilRight ? x + chunkWidth(ch) + 1 : x;
+    drawCell(lcd, dx,     0, 0);
+    drawCell(lcd, dx + 1, 0, 1);
+    drawCell(lcd, dx,     1, 2);
+    drawCell(lcd, dx + 1, 1, 3);
+  }
+}
+
+inline void eraseGroup(hd44780_pinIO& lcd, int x, int width) {
+  for (int c = x; c < x + width; c++) blankColumn(lcd, c);
+}
+
+// Slides the group one column at a time, only erasing the column it leaves behind.
+inline void slideGroup(hd44780_pinIO& lcd, int fromX, int toX, const BigChunk& ch,
+                       bool devil, bool devilRight, uint16_t stepMs) {
+  int dir = (toX >= fromX) ? 1 : -1;
+  int gw = groupWidth(ch, devil);
+
+  for (int x = fromX;; x += dir) {
+    drawGroup(lcd, x, ch, devil, devilRight);
+    blankColumn(lcd, dir > 0 ? x - 1 : x + gw);
+    delay(stepMs);
+    if (x == toX) break;
+  }
+}
+
+struct HypeWord {
+  const char* chunks[3];
+  uint8_t chunkCount;
+  bool devil;
+};
+
+// Chunks are what's on screen at once (see slot budget above).
+static const HypeWord HYPE_WORDS[] = {
+  {{"DU", "KE", nullptr}, 2, false},
+  {{"DD", "M", "F"},      3, true},
+  {{"GT", "HC", nullptr}, 2, false},
+};
+static const uint8_t HYPE_WORD_COUNT = sizeof(HYPE_WORDS) / sizeof(HYPE_WORDS[0]);
+
+// Letters (plus the devil on DDMF) run across the screen, pause in the middle
+// and blink, then exit the other side. With the devil on the left everything
+// moves right; with the devil on the right it's mirrored to face left and
+// everything moves left, so he's always chasing the letters.
+inline void bigWordAnimation(hd44780_pinIO& lcd, const HypeWord& w, bool devilRight,
+                             uint16_t stepMs = 70, uint16_t holdMs = 700) {
+  lcd.clear();
+  if (w.devil) loadDevil(lcd, devilRight);
+  uint8_t base = w.devil ? 4 : 0;
+
+  for (uint8_t c = 0; c < w.chunkCount; c++) {
+    lcd.clear();
+    BigChunk ch = loadChunk(lcd, w.chunks[c], base);
+    if (ch.n == 0) continue;
+
+    int gw = groupWidth(ch, w.devil);
+    int center = (16 - gw) / 2;
+    int startX = devilRight ? 16 : -gw;
+    int endX = devilRight ? -gw : 16;
+
+    slideGroup(lcd, startX, center, ch, w.devil, devilRight, stepMs);
+
+    delay(holdMs / 2);
+    for (uint8_t b = 0; b < 2; b++) {
+      eraseGroup(lcd, center, gw);
+      delay(120);
+      drawGroup(lcd, center, ch, w.devil, devilRight);
+      delay(200);
+    }
+    delay(holdMs / 2);
+
+    slideGroup(lcd, center, endX, ch, w.devil, devilRight, stepMs);
+  }
 
   lcd.clear();
-
-  // Type it out: D, DU, DUK, DUKE
-  for (uint8_t i = 1; i <= len; i++) {
-    lcd.setCursor(startCol, 0);
-    lcd.print(w.substring(0, i));
-    delay(letterMs);
-  }
-  delay(500);
-
-  // Blink the full word 3 times
-  for (uint8_t i = 0; i < 3; i++) {
-    lcd.clear();
-    delay(150);
-    lcd.setCursor(startCol, 0);
-    lcd.print(w);
-    delay(250);
-  }
 }
 
 // Cycles DUKE -> DDMF -> GTHC each time it's called
 inline void preGameHype(hd44780_pinIO& lcd) {
-  static const char* const WORDS[] = {"DUKE", "DDMF", "GTHC"};
   static uint8_t idx = 0;
-  letterRevealAnimation(lcd, WORDS[idx]);
-  idx = (idx + 1) % 3;
+  static bool devilRight = false;
+
+  const HypeWord& w = HYPE_WORDS[idx];
+  bigWordAnimation(lcd, w, devilRight);
+
+  if (w.devil) devilRight = !devilRight;  // alternate sides every DDMF
+  idx = (idx + 1) % HYPE_WORD_COUNT;
+
+  // The hype animation took over CGRAM, so give the dunk/three sprites back.
+  initDunkSprites(lcd);
 }
+
+// ============================================================================
+//  Everything below is unchanged
+// ============================================================================
 
 inline void scrollTextLine(hd44780_pinIO& lcd, uint8_t row, const String& text,
                            uint16_t startHoldMs = 1200,
