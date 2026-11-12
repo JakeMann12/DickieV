@@ -340,6 +340,11 @@ inline void bigWordAnimation(hd44780_pinIO& lcd, const HypeWord& w,
   uint8_t slots[8][8];
   uint8_t used = 0;
 
+  // All letters occupy their final centered positions; we just reveal them one
+  // at a time so the whole word looks like it's already there, lighting up.
+  int totalWidth = w.letterCount * 3 - 1;  // 2 cols per letter + 1 col gap
+  int startX = (16 - totalWidth) / 2;      // centered on 16-col display
+
   for (uint8_t i = 0; i < w.letterCount; i++) {
     const uint16_t* g = bigGlyph(w.letters[i]);
     if (!g) continue;
@@ -351,13 +356,13 @@ inline void bigWordAnimation(hd44780_pinIO& lcd, const HypeWord& w,
       code[t] = tileToCode(lcd, tile, slots, used, 0);
     }
 
-    int x = i * 3;  // fixed unmoving column (2 wide + 1 col gap)
+    int x = startX + i * 3;  // fixed centered unmoving column
     drawCell(lcd, x,     0, code[0]);
     drawCell(lcd, x + 1, 0, code[1]);
     drawCell(lcd, x,     1, code[2]);
     drawCell(lcd, x + 1, 1, code[3]);
 
-    delay(stepMs);  // show one letter before revealing the next
+    delay(stepMs);  // reveal one letter, then the next
   }
 
   delay(holdMs);  // hold the full word so it can be read
