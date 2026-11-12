@@ -404,7 +404,7 @@ bool checkForUpdate() {
   String payload = http.getString();
   http.end();
 
-  DynamicJsonDocument doc(4096);
+  JsonDocument doc(4096);
   DeserializationError err = deserializeJson(doc, payload);
   if (err) {
     Serial.println("JSON parse failed");
@@ -422,10 +422,16 @@ bool checkForUpdate() {
   Serial.printf("Current: %s | Latest: %s\n", FIRMWARE_VERSION, latestTag.c_str());
 
   if (!isNewerVersion(latestTag, FIRMWARE_VERSION)) {
+    showOnLcd("Up to date", FIRMWARE_VERSION);
+    delay(1200);
     Serial.println("No update needed");
     return false;
   }
 
+  // A newer version exists — show what we're moving to, then flash it.
+  showOnLcd("Update", latestTag);
+  delay(1200);
+  showOnLcd("loading...", "flashing...");
   Serial.println("Starting OTA...");
   t_httpUpdate_return ret = ESPhttpUpdate.update(client, assetUrl, FIRMWARE_VERSION);
 
@@ -512,13 +518,10 @@ void loop() {
     lastButtonCheckMs = nowMs;
     bool buttonState = digitalRead(BUTTON_PIN);
     if (buttonState == LOW && lastButtonState == HIGH) {
-      // Button pressed: trigger an OTA update check if we have WiFi.
+      // Button only does something when we're connected to WiFi.
       if (WiFi.status() == WL_CONNECTED) {
         showOnLcd("Checking...", "for update");
         checkForUpdate();
-      } else {
-        showOnLcd("No WiFi", "for update");
-        delay(1000);
       }
     }
     lastButtonState = buttonState;
