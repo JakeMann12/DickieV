@@ -64,13 +64,9 @@ inline void centeredText(hd44780_pinIO& lcd, uint8_t row, const char* s) {
 //  loaded into CGRAM. Identical tiles share a slot; blank tiles use ' ' and
 //  solid tiles use the built-in 0xFF block, so they cost no slots at all.
 //
-//  Letters are revealed one at a time, each at a fixed unmoving position (the
-//  next letter sits 3 columns to the right). Slots are claimed once and never
-//  overwritten, so letters already on screen stay correct as new ones appear.
-//
-//  Slot budget (only 8 exist): every distinct tile across a word's letters
-//  shares the pool; if more than 8 distinct tiles are needed the extras
-//  degrade gracefully to blank.
+//  Only ONE big letter is on screen at a time (D___ -> _U__ -> __K_ -> ___E),
+//  each at its fixed position in the word. A single letter needs at most 4
+//  CGRAM slots (of the 8 available), so CGRAM is reloaded per letter.
 // ============================================================================
 
 static const uint16_t BIG_D[16] = {
@@ -329,26 +325,29 @@ static const HypeWord HYPE_WORDS[] = {
 };
 static const uint8_t HYPE_WORD_COUNT = sizeof(HYPE_WORDS) / sizeof(HYPE_WORDS[0]);
 
-// Reveal the letters of a word one at a time, each at a fixed unmoving
-// position (each letter sits 3 columns to the right of the previous one).
-// All letters stay on screen once revealed; nothing slides or flies.
-// Distinct tiles are pooled into the 8 CGRAM slots and never overwritten, so
-// earlier letters remain correct while later ones are added.
+// Show the letters of a word ONE AT A TIME, each in its own fixed slot of the
+// word (D___ -> _U__ -> __K_ -> ___E). Only a single big letter is ever on
+// screen, so it needs at most 4 CGRAM slots and never runs out. The previous
+// letter is erased BEFORE CGRAM is reloaded so it can't glitch into the new one.
 inline void bigWordAnimation(hd44780_pinIO& lcd, const HypeWord& w,
-                             uint16_t stepMs = 500, uint16_t holdMs = 800) {
+                             uint16_t stepMs = 600, uint16_t gapMs = 80) {
   lcd.clear();
-  uint8_t slots[8][8];
-  uint8_t used = 0;
 
-  // All letters occupy their final centered positions; we just reveal them one
-  // at a time so the whole word looks like it's already there, lighting up.
   int totalWidth = w.letterCount * 3 - 1;  // 2 cols per letter + 1 col gap
   int startX = (16 - totalWidth) / 2;      // centered on 16-col display
+  int prevX = -100;
 
   for (uint8_t i = 0; i < w.letterCount; i++) {
     const uint16_t* g = bigGlyph(w.letters[i]);
     if (!g) continue;
 
+    if (prevX > -100) {
+      eraseGroup(lcd, prevX, 2);
+      delay(gapMs);
+    }
+
+    uint8_t slots[8][8];
+    uint8_t used = 0;
     uint8_t code[4];
     for (uint8_t t = 0; t < 4; t++) {
       uint8_t tile[8];
@@ -356,16 +355,16 @@ inline void bigWordAnimation(hd44780_pinIO& lcd, const HypeWord& w,
       code[t] = tileToCode(lcd, tile, slots, used, 0);
     }
 
-    int x = startX + i * 3;  // fixed centered unmoving column
+    int x = startX + i * 3;
     drawCell(lcd, x,     0, code[0]);
     drawCell(lcd, x + 1, 0, code[1]);
     drawCell(lcd, x,     1, code[2]);
     drawCell(lcd, x + 1, 1, code[3]);
+    prevX = x;
 
-    delay(stepMs);  // reveal one letter, then the next
+    delay(stepMs);
   }
 
-  delay(holdMs);  // hold the full word so it can be read
   lcd.clear();
 }
 
