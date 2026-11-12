@@ -123,14 +123,18 @@ static String makePstDateKeyFromUtc(time_t utcEpoch) {
   time_t pstEpoch = utcEpoch - (8 * 3600L);
   struct tm* pst = gmtime(&pstEpoch);
 
-  char yearBuf[5];
-  char monthBuf[3];
-  char dayBuf[3];
-  snprintf(yearBuf, sizeof(yearBuf), "%04d", pst->tm_year + 1900);
-  snprintf(monthBuf, sizeof(monthBuf), "%02d", pst->tm_mon + 1);
-  snprintf(dayBuf, sizeof(dayBuf), "%02d", pst->tm_mday);
+  String year = String(pst->tm_year + 1900);
+  String month = String(pst->tm_mon + 1);
+  String day = String(pst->tm_mday);
 
-  return String(yearBuf) + String(monthBuf) + String(dayBuf);
+  if (month.length() == 1) {
+    month = "0" + month;
+  }
+  if (day.length() == 1) {
+    day = "0" + day;
+  }
+
+  return year + month + day;
 }
 
 static bool isDukeGameToday(const String& iso) {
