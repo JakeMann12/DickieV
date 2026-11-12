@@ -156,3 +156,51 @@ When working on `checkForUpdate()` or any OTA-related code:
 - The OTA update loads only `src/main.cpp` and its dependencies.
 - If adding agent tooling, put it in `.agent/` or root-level scripts that are excluded from `src/`.
 - Always verify the build artifact (`.pio/build/esp12e/*.elf`) does not reference `.agent/` paths.
+
+---
+
+## 6. Version Bumping Rules
+
+### 6.1. Version Format
+
+`FIRMWARE_VERSION` in `src/main.cpp` follows semantic versioning: `MAJOR.MINOR.PATCH` (e.g. `1.0.0`).
+
+The LCD splash displays versions as `vMAJOR.MINOR.PATCH bBUILD` where `BUILD` is the git commit count
+(`git rev-list --count HEAD`), injected at compile time by `scripts/pre_build.py`.
+
+### 6.2. Bumping the Version
+
+The agent decides which component to bump:
+
+| Bump type | When to use | Effect |
+|-----------|-------------|--------|
+| `major`   | Breaking changes, new hardware, incompatible API | `1.0.0` → `2.0.0` |
+| `minor`   | New features, backward-compatible changes | `1.0.0` → `1.1.0` |
+| `patch`   | Bug fixes, small tweaks | `1.0.0` → `1.0.1` |
+
+Use `.agent/bump_version.py`:
+
+```powershell
+python .agent/bump_version.py patch   # 1.0.0 → 1.0.1
+python .agent/bump_version.py minor   # 1.0.0 → 1.1.0
+python .agent/bump_version.py major   # 1.0.0 → 2.0.0
+python .agent/bump_version.py --new 1.2.3  # explicit version
+```
+
+### 6.3. After Bumping
+
+1. Commit the `src/main.cpp` change.
+2. Create a git tag: `git tag v<major>.<minor>.<patch>` (e.g. `git tag v1.0.1`).
+3. Push tag: `git push origin v1.0.1`.
+4. Rebuild firmware: `pio run --project-dir .`.
+5. The GitHub Actions workflow (`buildversion.yml`) will also sync `FIRMWARE_VERSION` to `github.run_number` on CI builds.
+
+### 6.4. LCD Version Display
+
+The version splash now shows: `v<major>.<minor>.<patch> b<build>`
+
+Example: `v1.0.0 b26`
+
+The build number comes from `git rev-list --count HEAD` and is injected at compile time by
+`scripts/pre_build.py` writing `src/build_version.h`. Do not commit `build_version.h` — it is
+generated on every build.

@@ -11,6 +11,7 @@
 #include "phrases.h"
 #include "animations.h"
 #include "wifi_credentials.h"
+#include "build_version.h"
 
 const char* HOST = "site.api.espn.com";
 const char* PATH = "/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups=50&limit=400&dates=";
@@ -361,7 +362,7 @@ void fetchScore() {
 
   cachedGameStartIso = "";
   writeBootCache(makePstDateString(), WiFi.SSID(), cachedGameStartIso);
-  showOnLcd("No Duke game", String("today v") + FIRMWARE_VERSION);
+  showOnLcd("No Duke game", String("today v") + String(FIRMWARE_VERSION) + " b" + String(BUILD_NUMBER));
 }
 
 // Very simple semver compare (handles tags like "v1.2.3").
@@ -426,7 +427,7 @@ bool checkForUpdate() {
   Serial.printf("Current: %s | Latest: %s\n", FIRMWARE_VERSION, latestTag.c_str());
 
   if (!isNewerVersion(latestTag, FIRMWARE_VERSION)) {
-    showOnLcd("Up to date", FIRMWARE_VERSION);
+    showOnLcd("Up to date", "v" + String(FIRMWARE_VERSION) + " b" + String(BUILD_NUMBER));
     delay(1200);
     Serial.println("No update needed");
     return false;
@@ -452,7 +453,7 @@ bool checkForUpdate() {
   t_httpUpdate_return ret = ESPhttpUpdate.update(dlClient, assetUrl);
 
   switch (ret) {
-    case HTTP_UPDATE_FAILED:
+    case HTTP_UPDATE_FAILED: {
       Serial.printf("OTA failed: %s\n", ESPhttpUpdate.getLastErrorString().c_str());
       showOnLcd("OTA failed", ESPhttpUpdate.getLastErrorString());
       delay(2000);
@@ -461,6 +462,7 @@ bool checkForUpdate() {
       Serial.printf("SSL error %d: %s\n", sslCode, sslErr);
       Serial.printf("Free heap after fail: %u\n", ESP.getFreeHeap());
       return false;
+    }
     case HTTP_UPDATE_NO_UPDATES:
       Serial.println("No update available");
       return false;
@@ -490,7 +492,7 @@ void setup() {
   flashThreeAnimation(lcd);
 
   // Brief version splash so you can see which firmware is running.
-  showOnLcd("DickieV", FIRMWARE_VERSION);
+  showOnLcd("DickieV", "v" + String(FIRMWARE_VERSION) + " b" + String(BUILD_NUMBER));
   delay(1000);
 
   // Kick off the WiFi connection attempt in the background. The startup hype
