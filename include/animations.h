@@ -56,7 +56,7 @@ inline void centeredText(hd44780_pinIO& lcd, uint8_t row, const char* s) {
 }
 
 // ============================================================================
-//  BIG 2x2 LETTERS + DEVIL SPRITE
+//  BIG 2x2 LETTERS, ONE AT A TIME, UNMOVING
 // ============================================================================
 //  Every glyph is a 10 px wide x 16 px tall bitmap = 2x2 LCD cells.
 //  16 rows per glyph, bit 9 (leftmost digit) = leftmost pixel. 1 = lit.
@@ -64,10 +64,13 @@ inline void centeredText(hd44780_pinIO& lcd, uint8_t row, const char* s) {
 //  loaded into CGRAM. Identical tiles share a slot; blank tiles use ' ' and
 //  solid tiles use the built-in 0xFF block, so they cost no slots at all.
 //
-//  Slot budget (only 8 exist):
-//    - DUKE / GTHC: letters are shown two at a time (4 + 4 tiles = 8 slots)
-//    - DDMF: devil uses slots 0-3, letters get 4-7, so one letter (or the
-//      double D, which shares tiles) at a time
+//  Letters are revealed one at a time, each at a fixed unmoving position (the
+//  next letter sits 3 columns to the right). Slots are claimed once and never
+//  overwritten, so letters already on screen stay correct as new ones appear.
+//
+//  Slot budget (only 8 exist): every distinct tile across a word's letters
+//  shares the pool; if more than 8 distinct tiles are needed the extras
+//  degrade gracefully to blank.
 // ============================================================================
 
 static const uint16_t BIG_D[16] = {
@@ -313,65 +316,61 @@ inline void slideGroup(hd44780_pinIO& lcd, int fromX, int toX, const BigChunk& c
 }
 
 struct HypeWord {
-  const char* chunks[3];
-  uint8_t chunkCount;
-  bool devil;
+  const char* letters;
+  uint8_t letterCount;
 };
 
-// Chunks are what's on screen at once (see slot budget above).
+// One entry per word: the letters are revealed one at a time at fixed,
+// unmoving positions (see bigWordAnimation).
 static const HypeWord HYPE_WORDS[] = {
-  {{"DU", "KE", nullptr}, 2, false},
-  {{"DD", "M", "F"},      3, true},
-  {{"GT", "HC", nullptr}, 2, false},
+  { "DUKE", 4 },
+  { "DDMF", 4 },
+  { "GTHC", 4 },
 };
 static const uint8_t HYPE_WORD_COUNT = sizeof(HYPE_WORDS) / sizeof(HYPE_WORDS[0]);
 
-// Letters (plus the devil on DDMF) run across the screen, pause in the middle
-// and blink, then exit the other side. With the devil on the left everything
-// moves right; with the devil on the right it's mirrored to face left and
-// everything moves left, so he's always chasing the letters.
-inline void bigWordAnimation(hd44780_pinIO& lcd, const HypeWord& w, bool devilRight,
-                             uint16_t stepMs = 70, uint16_t holdMs = 700) {
+// Reveal the letters of a word one at a time, each at a fixed unmoving
+// position (each letter sits 3 columns to the right of the previous one).
+// All letters stay on screen once revealed; nothing slides or flies.
+// Distinct tiles are pooled into the 8 CGRAM slots and never overwritten, so
+// earlier letters remain correct while later ones are added.
+inline void bigWordAnimation(hd44780_pinIO& lcd, const HypeWord& w,
+                             uint16_t stepMs = 500, uint16_t holdMs = 800) {
   lcd.clear();
-  if (w.devil) loadDevil(lcd, devilRight);
-  uint8_t base = w.devil ? 4 : 0;
+  uint8_t slots[8][8];
+  uint8_t used = 0;
 
-  for (uint8_t c = 0; c < w.chunkCount; c++) {
-    lcd.clear();
-    BigChunk ch = loadChunk(lcd, w.chunks[c], base);
-    if (ch.n == 0) continue;
+  for (uint8_t i = 0; i < w.letterCount; i++) {
+    const uint16_t* g = bigGlyph(w.letters[i]);
+    if (!g) continue;
 
-    int gw = groupWidth(ch, w.devil);
-    int center = (16 - gw) / 2;
-    int startX = devilRight ? 16 : -gw;
-    int endX = devilRight ? -gw : 16;
-
-    slideGroup(lcd, startX, center, ch, w.devil, devilRight, stepMs);
-
-    delay(holdMs / 2);
-    for (uint8_t b = 0; b < 2; b++) {
-      eraseGroup(lcd, center, gw);
-      delay(120);
-      drawGroup(lcd, center, ch, w.devil, devilRight);
-      delay(200);
+    uint8_t code[4];
+    for (uint8_t t = 0; t < 4; t++) {
+      uint8_t tile[8];
+      sliceTile(g, false, t & 1, t >> 1, tile);
+      code[t] = tileToCode(lcd, tile, slots, used, 0);
     }
-    delay(holdMs / 2);
 
-    slideGroup(lcd, center, endX, ch, w.devil, devilRight, stepMs);
+    int x = i * 3;  // fixed unmoving column (2 wide + 1 col gap)
+    drawCell(lcd, x,     0, code[0]);
+    drawCell(lcd, x + 1, 0, code[1]);
+    drawCell(lcd, x,     1, code[2]);
+    drawCell(lcd, x + 1, 1, code[3]);
+
+    delay(stepMs);  // show one letter before revealing the next
   }
 
+  delay(holdMs);  // hold the full word so it can be read
   lcd.clear();
 }
 
 // Cycles DUKE -> DDMF -> GTHC each time it's called
 inline void preGameHype(hd44780_pinIO& lcd) {
   static uint8_t idx = 0;
-  static bool devilRight = false;
 
   const HypeWord& w = HYPE_WORDS[idx];
-  bigWordAnimation(lcd, w, devilRight);
+  bigWordAnimation(lcd, w);
 
-  if (w.devil) devilRight = !devilRight;  // alternate sides every DDMF
   idx = (idx + 1) % HYPE_WORD_COUNT;
 
   // The hype animation took over CGRAM, so give the dunk/three sprites back.
