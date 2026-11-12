@@ -10,7 +10,6 @@
 #include <time.h>
 #include "phrases.h"
 #include "animations.h"
-#include "wifi_credentials.h"
 #include "build_version.h"
 
 const char* HOST = "site.api.espn.com";
@@ -182,13 +181,46 @@ static void writeBootCache(const String& dateKey, const String& ssid, const Stri
   EEPROM.end();
 }
 
+// WiFi networks, parsed at boot from WIFI_SECRETS_BYTES which scripts/pre_build.py
+// injects from the WIFI_SECRETS repo secret / env var ("SSID|PASSWORD" per line).
+struct WifiNetwork {
+  String ssid;
+  String password;
+};
+
+static const size_t MAX_WIFI_NETWORKS = 8;
+static WifiNetwork wifiNetworks[MAX_WIFI_NETWORKS];
+static size_t wifiNetworkCount = 0;
+
+static void loadWifiNetworks() {
+  wifiNetworkCount = 0;
+#ifdef WIFI_SECRETS_BYTES
+  static const char secrets[] = { WIFI_SECRETS_BYTES, 0 };
+  String all(secrets);
+  int start = 0;
+  while (start < (int)all.length() && wifiNetworkCount < MAX_WIFI_NETWORKS) {
+    int end = all.indexOf('\n', start);
+    if (end < 0) end = all.length();
+    int sep = all.indexOf('|', start);
+    if (sep > start && sep < end) {
+      wifiNetworks[wifiNetworkCount].ssid = all.substring(start, sep);
+      wifiNetworks[wifiNetworkCount].password = all.substring(sep + 1, end);
+      ++wifiNetworkCount;
+    }
+    start = end + 1;
+  }
+#else
+  Serial.println("WARNING: built without WIFI_SECRETS; no WiFi networks configured");
+#endif
+}
+
 // Non-blocking WiFi connection.
 // beginWifiConnect() picks the preferred-first network order and starts the
 // first attempt. pollWifiConnect() must be called repeatedly; it returns true
 // once connected, false while still trying or once every network has been tried.
 // The ESP8266 WiFi stack keeps attempting the connection in the background
 // (during delay()/yield()), so the caller is free to keep the LCD animated.
-static size_t g_wifiOrder[8];
+static size_t g_wifiOrder[MAX_WIFI_NETWORKS];
 static size_t g_wifiOrderCount = 0;
 static size_t g_wifiIndex = 0;
 static unsigned long g_wifiStartMs = 0;
@@ -206,7 +238,7 @@ static void attemptWifiNetwork(size_t idx) {
 }
 
 static void beginWifiConnect() {
-  const size_t totalNetworks = sizeof(wifiNetworks) / sizeof(wifiNetworks[0]);
+  const size_t totalNetworks = wifiNetworkCount;
   g_wifiOrderCount = 0;
   g_wifiActive = false;
   g_wifiExhausted = false;
@@ -217,7 +249,7 @@ static void beginWifiConnect() {
   int preferredIndex = -1;
   if (bootCache.lastConnectedSsid[0] != '\0') {
     for (size_t i = 0; i < totalNetworks; ++i) {
-      if (String(wifiNetworks[i].ssid) == String(bootCache.lastConnectedSsid)) {
+      if (wifiNetworks[i].ssid == String(bootCache.lastConnectedSsid)) {
         preferredIndex = static_cast<int>(i);
         break;
       }
@@ -382,18 +414,21 @@ bool isNewerVersion(String newTag, String currentTag) {
   return aPatch > bPatch;
 }
 
-// Check GitHub releases for a newer firmware binary and OTA-update if found.
-// Based on the project's OTA inspiration snippet.
-bool checkForUpdate() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("OTA check skipped: not connected to WiFi");
-    return false;
-  }
+static void logHeap(const char* label) {
+  Serial.printf("[heap] %s: free=%u maxBlock=%u frag=%u%%\n", label, ESP.getFreeHeap(),
+                ESP.getMaxFreeBlockSize(), ESP.getHeapFragmentation());
+}
 
+// Query the GitHub "latest release" API. Kept in its own function so that the
+// TLS client, HTTPClient and JsonDocument are all destroyed before OTA starts:
+// the OTA download needs ~17 KB of contiguous heap for BearSSL's RX buffer.
+static bool fetchLatestRelease(String& latestTag, String& assetUrl) {
   WiFiClientSecure client;
   client.setInsecure(); // tradeoff: accept self-signed / no cert validation
 
   HTTPClient http;
+  // HTTP/1.0 avoids chunked transfer encoding so the body can be stream-parsed.
+  http.useHTTP10(true);
   String url = "https://api.github.com/repos/" + githubOwner + "/" + githubRepo + "/releases/latest";
   http.begin(client, url);
   http.addHeader("User-Agent", "DickieV-ESP8266");
@@ -406,18 +441,41 @@ bool checkForUpdate() {
     return false;
   }
 
-  String payload = http.getString();
-  http.end();
+  // Only keep the two fields we need instead of buffering the full release
+  // JSON (body, author, asset metadata...) in RAM.
+  JsonDocument filter;
+  filter["tag_name"] = true;
+  filter["assets"][0]["browser_download_url"] = true;
 
   JsonDocument doc;
-  DeserializationError err = deserializeJson(doc, payload.c_str());
+  DeserializationError err =
+    deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+  http.end();
   if (err) {
-    Serial.println("JSON parse failed");
+    Serial.printf("JSON parse failed: %s\n", err.c_str());
     return false;
   }
 
-  String latestTag = doc["tag_name"] | "";
-  String assetUrl = doc["assets"][0]["browser_download_url"] | "";
+  latestTag = doc["tag_name"] | "";
+  assetUrl = doc["assets"][0]["browser_download_url"] | "";
+  return true;
+}
+
+// Check GitHub releases for a newer firmware binary and OTA-update if found.
+// Based on the project's OTA inspiration snippet.
+bool checkForUpdate() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("OTA check skipped: not connected to WiFi");
+    return false;
+  }
+
+  logHeap("before release check");
+
+  String latestTag;
+  String assetUrl;
+  if (!fetchLatestRelease(latestTag, assetUrl)) {
+    return false;
+  }
 
   if (latestTag.length() == 0 || assetUrl.length() == 0) {
     Serial.println("No release asset found");
@@ -439,9 +497,6 @@ bool checkForUpdate() {
   showOnLcd("loading...", "flashing...");
   Serial.println("Starting OTA...");
 
-  payload = String();
-  delay(500);
-
   WiFiClientSecure dlClient;
   dlClient.setInsecure();
   dlClient.setTimeout(30000);
@@ -449,7 +504,7 @@ bool checkForUpdate() {
   ESPhttpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   ESPhttpUpdate.rebootOnUpdate(true);
 
-  Serial.printf("Free heap before OTA: %u\n", ESP.getFreeHeap());
+  logHeap("before OTA");
   t_httpUpdate_return ret = ESPhttpUpdate.update(dlClient, assetUrl);
 
   switch (ret) {
@@ -460,7 +515,7 @@ bool checkForUpdate() {
       char sslErr[128];
       int sslCode = dlClient.getLastSSLError(sslErr, sizeof(sslErr));
       Serial.printf("SSL error %d: %s\n", sslCode, sslErr);
-      Serial.printf("Free heap after fail: %u\n", ESP.getFreeHeap());
+      logHeap("after OTA fail");
       return false;
     }
     case HTTP_UPDATE_NO_UPDATES:
@@ -487,6 +542,7 @@ void setup() {
   initDunkSprites(lcd);
 
   readBootCache();
+  loadWifiNetworks();
 
   flashDunkAnimation(lcd);
   flashThreeAnimation(lcd);
