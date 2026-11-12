@@ -172,9 +172,9 @@ static bool readBootCache() {
 static void writeBootCache(const String& dateKey, const String& ssid, const String& gameStartIso) {
   memset(&bootCache, 0, sizeof(bootCache));
   bootCache.magic = BOOT_CACHE_MAGIC;
-  snprintf(bootCache.lastDateKey, sizeof(bootCache.lastDateKey), "%s", dateKey.c_str());
-  snprintf(bootCache.lastConnectedSsid, sizeof(bootCache.lastConnectedSsid), "%s", ssid.c_str());
-  snprintf(bootCache.lastGameStartIso, sizeof(bootCache.lastGameStartIso), "%s", gameStartIso.c_str());
+  strlcpy(bootCache.lastDateKey, dateKey.c_str(), sizeof(bootCache.lastDateKey));
+  strlcpy(bootCache.lastConnectedSsid, ssid.c_str(), sizeof(bootCache.lastConnectedSsid));
+  strlcpy(bootCache.lastGameStartIso, gameStartIso.c_str(), sizeof(bootCache.lastGameStartIso));
   EEPROM.begin(sizeof(BootCache));
   EEPROM.put(0, bootCache);
   EEPROM.commit();
