@@ -434,12 +434,11 @@ bool checkForUpdate() {
   showOnLcd("loading...", "flashing...");
   Serial.println("Starting OTA...");
 
-  client.stop();
   payload = String();
+  delay(500);
 
   WiFiClientSecure dlClient;
   dlClient.setInsecure();
-  dlClient.setBufferSizes(1024, 512);
 
   ESPhttpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   ESPhttpUpdate.rebootOnUpdate(true);
