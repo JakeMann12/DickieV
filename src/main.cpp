@@ -439,6 +439,7 @@ bool checkForUpdate() {
 
   WiFiClientSecure dlClient;
   dlClient.setInsecure();
+  dlClient.setTimeout(30000);
 
   ESPhttpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   ESPhttpUpdate.rebootOnUpdate(true);
@@ -451,6 +452,10 @@ bool checkForUpdate() {
       Serial.printf("OTA failed: %s\n", ESPhttpUpdate.getLastErrorString().c_str());
       showOnLcd("OTA failed", ESPhttpUpdate.getLastErrorString());
       delay(2000);
+      char sslErr[128];
+      int sslCode = dlClient.getLastSSLError(sslErr, sizeof(sslErr));
+      Serial.printf("SSL error %d: %s\n", sslCode, sslErr);
+      Serial.printf("Free heap after fail: %u\n", ESP.getFreeHeap());
       return false;
     case HTTP_UPDATE_NO_UPDATES:
       Serial.println("No update available");
