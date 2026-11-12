@@ -29,6 +29,52 @@ jobs:
       - name: Install PlatformIO
         run: pip3 install platformio
 
+      - name: Generate WiFi credentials header
+        env:
+          WIFI_SECRETS: ${{ secrets.WIFI_SECRETS }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          data = os.environ.get("WIFI_SECRETS", "").strip()
+          if not data:
+              raise SystemExit("WIFI_SECRETS is empty. Add the secret in GitHub Actions repository settings.")
+
+          lines = [line.strip() for line in data.splitlines() if line.strip()]
+          if not lines:
+              raise SystemExit("WIFI_SECRETS does not contain any WiFi entries.")
+
+          networks = []
+          for line in lines:
+              if "|" not in line:
+                  raise SystemExit(f"Bad WiFi entry format: {line!r}. Expected SSID|PASSWORD")
+              ssid, password = [part.strip() for part in line.split("|", 1)]
+              if not ssid or not password:
+                  raise SystemExit(f"Invalid WiFi entry: {line!r}")
+              networks.append((ssid, password))
+
+          header = [
+              "#pragma once",
+              "",
+              "struct WifiNetwork {",
+              "  const char* ssid;",
+              "  const char* password;",
+              "};",
+              "",
+              "const WifiNetwork wifiNetworks[] = {",
+          ]
+
+          for ssid, password in networks:
+              esc_ssid = ssid.replace("\\", "\\\\").replace('"', '\\"')
+              esc_password = password.replace("\\", "\\\\").replace('"', '\\"')
+              header.append(f'  {{"{esc_ssid}", "{esc_password}"},')
+
+          header.append("};")
+          Path("include").mkdir(exist_ok=True)
+          Path("include/wifi_credentials.h").write_text("\n".join(header) + "\n")
+          PY
+
       - name: Build firmware
         run: pio run -e esp12e
 
