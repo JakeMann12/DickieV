@@ -404,7 +404,7 @@ bool checkForUpdate() {
   String payload = http.getString();
   http.end();
 
-  JsonDocument doc(4096);
+  JsonDocument doc;
   DeserializationError err = deserializeJson(doc, payload);
   if (err) {
     Serial.println("JSON parse failed");
