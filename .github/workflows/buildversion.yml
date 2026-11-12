@@ -21,10 +21,10 @@ jobs:
           cp -a /tmp/dickievrepo/. "$GITHUB_WORKSPACE/"
           cd "$GITHUB_WORKSPACE"
 
-      - name: Install Python
+      - name: Install Python and platform tools
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y python3 python3-pip
+          sudo apt-get install -y python3 python3-pip gh
 
       - name: Install PlatformIO
         run: pip3 install platformio
