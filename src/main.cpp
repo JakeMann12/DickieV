@@ -158,10 +158,36 @@ static void writeBootCache(const String& dateKey, const String& ssid, const Stri
   EEPROM.end();
 }
 
-static bool tryConnectToPreferredWifi() {
+// Non-blocking WiFi connection.
+// beginWifiConnect() picks the preferred-first network order and starts the
+// first attempt. pollWifiConnect() must be called repeatedly; it returns true
+// once connected, false while still trying or once every network has been tried.
+// The ESP8266 WiFi stack keeps attempting the connection in the background
+// (during delay()/yield()), so the caller is free to keep the LCD animated.
+static size_t g_wifiOrder[8];
+static size_t g_wifiOrderCount = 0;
+static size_t g_wifiIndex = 0;
+static unsigned long g_wifiStartMs = 0;
+static bool g_wifiActive = false;
+static bool g_wifiExhausted = false;
+
+static void attemptWifiNetwork(size_t idx) {
+  const WifiNetwork& network = wifiNetworks[g_wifiOrder[idx]];
+  Serial.print("Trying: ");
+  Serial.println(network.ssid);
+  WiFi.disconnect();
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(network.ssid, network.password);
+  g_wifiStartMs = millis();
+}
+
+static void beginWifiConnect() {
   const size_t totalNetworks = sizeof(wifiNetworks) / sizeof(wifiNetworks[0]);
+  g_wifiOrderCount = 0;
+  g_wifiActive = false;
+  g_wifiExhausted = false;
   if (totalNetworks == 0) {
-    return false;
+    return;
   }
 
   int preferredIndex = -1;
@@ -174,37 +200,42 @@ static bool tryConnectToPreferredWifi() {
     }
   }
 
-  size_t ordered[8] = {0};
-  size_t orderCount = 0;
   if (preferredIndex >= 0) {
-    ordered[orderCount++] = static_cast<size_t>(preferredIndex);
+    g_wifiOrder[g_wifiOrderCount++] = static_cast<size_t>(preferredIndex);
   }
   for (size_t i = 0; i < totalNetworks; ++i) {
     if (static_cast<int>(i) != preferredIndex) {
-      ordered[orderCount++] = i;
+      g_wifiOrder[g_wifiOrderCount++] = i;
     }
   }
 
-  for (size_t orderIndex = 0; orderIndex < orderCount; ++orderIndex) {
-    const WifiNetwork& network = wifiNetworks[ordered[orderIndex]];
-    Serial.print("Trying: ");
-    Serial.println(network.ssid);
-    WiFi.disconnect();
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(network.ssid, network.password);
+  g_wifiIndex = 0;
+  g_wifiActive = true;
+  attemptWifiNetwork(g_wifiIndex);
+}
 
-    unsigned long startMs = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - startMs < 10000UL) {
-      delay(250);
-    }
+// Returns true once connected. Non-blocking: call repeatedly.
+static bool pollWifiConnect() {
+  if (!g_wifiActive || g_wifiExhausted) {
+    return false;
+  }
 
-    if (WiFi.status() == WL_CONNECTED) {
-      String connectedSsid = WiFi.SSID();
-      Serial.print("Connected to ");
-      Serial.println(network.ssid);
-      writeBootCache(makePstDateString(), connectedSsid, cachedGameStartIso);
-      return true;
+  if (WiFi.status() == WL_CONNECTED) {
+    String connectedSsid = WiFi.SSID();
+    Serial.print("Connected to ");
+    Serial.println(connectedSsid);
+    writeBootCache(makePstDateString(), connectedSsid, cachedGameStartIso);
+    g_wifiActive = false;
+    return true;
+  }
+
+  if (millis() - g_wifiStartMs >= 10000UL) {
+    if (++g_wifiIndex >= g_wifiOrderCount) {
+      g_wifiActive = false;
+      g_wifiExhausted = true;
+      return false;
     }
+    attemptWifiNetwork(g_wifiIndex);
   }
 
   return false;
@@ -324,18 +355,16 @@ void setup() {
   flashDunkAnimation(lcd);
   flashThreeAnimation(lcd);
 
+  // Kick off the WiFi connection attempt in the background. The startup hype
+  // animation keeps running on the LCD while pollWifiConnect() drives the
+  // connection attempt under the hood between animation frames.
+  beginWifiConnect();
   bool connected = false;
-  for (uint8_t i = 0; i < 2 && !connected; ++i) {
-    preGameHype(lcd);
-    connected = tryConnectToPreferredWifi();
-  }
-
-  if (!connected) {
-    lcd.clear();
-    lcd.print("Connecting...");
-    for (uint8_t i = 0; i < 2 && !connected; ++i) {
-      preGameHype(lcd);
-      connected = tryConnectToPreferredWifi();
+  if (g_wifiActive) {
+    unsigned long connectDeadline = millis() + 40000UL;
+    while (!connected && !g_wifiExhausted && millis() < connectDeadline) {
+      preGameHype(lcd);          // startup animation keeps displaying
+      connected = pollWifiConnect();  // non-blocking; WiFi connects under the hood
     }
   }
 
