@@ -78,6 +78,11 @@ jobs:
           Path("include/wifi_credentials.h").write_text("\n".join(header) + "\n")
           PY
 
+      - name: Sync firmware version from run number
+        run: |
+          sed -i 's|const char\* FIRMWARE_VERSION = ".*"|const char* FIRMWARE_VERSION = "${{ github.run_number }}"|' src/main.cpp
+          grep FIRMWARE_VERSION src/main.cpp
+
       - name: Build firmware
         run: pio run -e esp12e
 
