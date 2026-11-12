@@ -357,7 +357,7 @@ void fetchScore() {
 
   cachedGameStartIso = "";
   writeBootCache(makePstDateString(), WiFi.SSID(), cachedGameStartIso);
-  showOnLcd("No Duke game", "today");
+  showOnLcd("No Duke game", String("today v") + FIRMWARE_VERSION);
 }
 
 // Very simple semver compare (handles tags like "v1.2.3").
@@ -520,8 +520,12 @@ void loop() {
     if (buttonState == LOW && lastButtonState == HIGH) {
       // Button only does something when we're connected to WiFi.
       if (WiFi.status() == WL_CONNECTED) {
-        showOnLcd("Checking...", "for update");
+        showOnLcd("Check update", "now...");
+        delay(600);  // let the user see the button press registered
         checkForUpdate();
+      } else {
+        showOnLcd("WiFi not", "connected");
+        delay(1200);
       }
     }
     lastButtonState = buttonState;
