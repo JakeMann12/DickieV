@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <WiFiClientSecure.h>
+#include <ESP8266HTTPClient.h>
+#include <ESP8266httpUpdate.h>
 #include <EEPROM.h>
 #include <ArduinoJson.h>
 #include <hd44780.h>
@@ -16,6 +18,13 @@ const char* TEAM = "DUKE";
 const unsigned long GAME_START_CHECK_INTERVAL_MS = 15UL * 1000UL;
 const unsigned long COUNTDOWN_TICK_MS = 1000UL;
 
+// Firmware version (light versioning — bump on each release).
+const char* FIRMWARE_VERSION = "1.0.0";
+
+// Button wired from D4 to GND. Uses the internal pullup so the pin reads
+// HIGH when open and LOW when the button is pressed.
+const uint8_t BUTTON_PIN = D4;
+
 struct BootCache {
   uint32_t magic;
   char lastDateKey[9];
@@ -28,6 +37,16 @@ static String cachedGameStartIso;
 static unsigned long lastGameStartCheckMs = 0;
 static unsigned long lastCountdownRefreshMs = 0;
 static BootCache bootCache = {};
+
+// Button debounce state.
+static unsigned long lastButtonCheckMs = 0;
+static bool lastButtonState = HIGH;
+
+// OTA update config.
+static unsigned long lastUpdateCheckMs = 0;
+const unsigned long UPDATE_CHECK_INTERVAL_MS = 60UL * 60UL * 1000UL; // hourly check
+const String githubOwner = "JakeMann12";
+const String githubRepo = "DickieV";
 
 hd44780_pinIO lcd(D1, D2, D5, D6, D7, D0);
 
@@ -341,8 +360,95 @@ void fetchScore() {
   showOnLcd("No Duke game", "today");
 }
 
+// Very simple semver compare (handles tags like "v1.2.3").
+// Example: 1.10.0 > 1.9.0
+bool isNewerVersion(String newTag, String currentTag) {
+  newTag.replace("v", "");
+  currentTag.replace("v", "");
+
+  int aMajor = 0, aMinor = 0, aPatch = 0;
+  int bMajor = 0, bMinor = 0, bPatch = 0;
+
+  sscanf(newTag.c_str(), "%d.%d.%d", &aMajor, &aMinor, &aPatch);
+  sscanf(currentTag.c_str(), "%d.%d.%d", &bMajor, &bMinor, &bPatch);
+
+  if (aMajor != bMajor) return aMajor > bMajor;
+  if (aMinor != bMinor) return aMinor > bMinor;
+  return aPatch > bPatch;
+}
+
+// Check GitHub releases for a newer firmware binary and OTA-update if found.
+// Based on the project's OTA inspiration snippet.
+bool checkForUpdate() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("OTA check skipped: not connected to WiFi");
+    return false;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure(); // tradeoff: accept self-signed / no cert validation
+
+  HTTPClient http;
+  String url = "https://api.github.com/repos/" + githubOwner + "/" + githubRepo + "/releases/latest";
+  http.begin(client, url);
+  http.addHeader("User-Agent", "DickieV-ESP8266");
+  http.addHeader("Accept", "application/vnd.github+json");
+
+  int httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    Serial.printf("GitHub API failed: %d\n", httpCode);
+    http.end();
+    return false;
+  }
+
+  String payload = http.getString();
+  http.end();
+
+  DynamicJsonDocument doc(4096);
+  DeserializationError err = deserializeJson(doc, payload);
+  if (err) {
+    Serial.println("JSON parse failed");
+    return false;
+  }
+
+  String latestTag = doc["tag_name"] | "";
+  String assetUrl = doc["assets"][0]["browser_download_url"] | "";
+
+  if (latestTag.length() == 0 || assetUrl.length() == 0) {
+    Serial.println("No release asset found");
+    return false;
+  }
+
+  Serial.printf("Current: %s | Latest: %s\n", FIRMWARE_VERSION, latestTag.c_str());
+
+  if (!isNewerVersion(latestTag, FIRMWARE_VERSION)) {
+    Serial.println("No update needed");
+    return false;
+  }
+
+  Serial.println("Starting OTA...");
+  t_httpUpdate_return ret = ESPhttpUpdate.update(client, assetUrl, FIRMWARE_VERSION);
+
+  switch (ret) {
+    case HTTP_UPDATE_FAILED:
+      Serial.printf("OTA failed: %s\n", ESPhttpUpdate.getLastErrorString().c_str());
+      return false;
+    case HTTP_UPDATE_NO_UPDATES:
+      Serial.println("No update available");
+      return false;
+    case HTTP_UPDATE_OK:
+      Serial.println("OTA OK");
+      return true;
+  }
+
+  return false;
+}
+
 void setup() {
   Serial.begin(115200);
+  Serial.printf("DickieV firmware %s\n", FIRMWARE_VERSION);
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
 
   int status = lcd.begin(16, 2);
   if (status) {
@@ -354,6 +460,10 @@ void setup() {
 
   flashDunkAnimation(lcd);
   flashThreeAnimation(lcd);
+
+  // Brief version splash so you can see which firmware is running.
+  showOnLcd("DickieV", FIRMWARE_VERSION);
+  delay(1000);
 
   // Kick off the WiFi connection attempt in the background. The startup hype
   // animation keeps running on the LCD while pollWifiConnect() drives the
@@ -395,9 +505,26 @@ void setup() {
 }
 
 void loop() {
-  if (WiFi.status() == WL_CONNECTED) {
-    unsigned long nowMs = millis();
+  unsigned long nowMs = millis();
 
+  // Debounced button read on D4 (INPUT_PULLUP, button to GND -> pressed = LOW).
+  if (nowMs - lastButtonCheckMs >= 50UL) {
+    lastButtonCheckMs = nowMs;
+    bool buttonState = digitalRead(BUTTON_PIN);
+    if (buttonState == LOW && lastButtonState == HIGH) {
+      // Button pressed: trigger an OTA update check if we have WiFi.
+      if (WiFi.status() == WL_CONNECTED) {
+        showOnLcd("Checking...", "for update");
+        checkForUpdate();
+      } else {
+        showOnLcd("No WiFi", "for update");
+        delay(1000);
+      }
+    }
+    lastButtonState = buttonState;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
     if (lastGameStartCheckMs == 0 ||
         nowMs - lastGameStartCheckMs >= GAME_START_CHECK_INTERVAL_MS) {
       lastGameStartCheckMs = nowMs;
@@ -408,6 +535,12 @@ void loop() {
         nowMs - lastCountdownRefreshMs >= COUNTDOWN_TICK_MS) {
       lastCountdownRefreshMs = nowMs;
       refreshCountdownDisplay();
+    }
+
+    // Periodic OTA update check (hourly).
+    if (nowMs - lastUpdateCheckMs >= UPDATE_CHECK_INTERVAL_MS) {
+      lastUpdateCheckMs = nowMs;
+      checkForUpdate();
     }
   }
 
