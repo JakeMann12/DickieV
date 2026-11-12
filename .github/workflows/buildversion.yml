@@ -68,7 +68,7 @@ jobs:
           for ssid, password in networks:
               esc_ssid = ssid.replace("\\", "\\\\").replace('"', '\\"')
               esc_password = password.replace("\\", "\\\\").replace('"', '\\"')
-              header.append(f'  {{"{esc_ssid}", "{esc_password}"},')
+              header.append('  {"' + esc_ssid + '", "' + esc_password + '"},')
 
           header.append("};")
           Path("include").mkdir(exist_ok=True)
