@@ -433,11 +433,25 @@ bool checkForUpdate() {
   delay(1200);
   showOnLcd("loading...", "flashing...");
   Serial.println("Starting OTA...");
-  t_httpUpdate_return ret = ESPhttpUpdate.update(client, assetUrl, FIRMWARE_VERSION);
+
+  client.stop();
+  payload = String();
+
+  WiFiClientSecure dlClient;
+  dlClient.setInsecure();
+  dlClient.setBufferSizes(1024, 512);
+
+  ESPhttpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  ESPhttpUpdate.rebootOnUpdate(true);
+
+  Serial.printf("Free heap before OTA: %u\n", ESP.getFreeHeap());
+  t_httpUpdate_return ret = ESPhttpUpdate.update(dlClient, assetUrl);
 
   switch (ret) {
     case HTTP_UPDATE_FAILED:
       Serial.printf("OTA failed: %s\n", ESPhttpUpdate.getLastErrorString().c_str());
+      showOnLcd("OTA failed", ESPhttpUpdate.getLastErrorString());
+      delay(2000);
       return false;
     case HTTP_UPDATE_NO_UPDATES:
       Serial.println("No update available");
