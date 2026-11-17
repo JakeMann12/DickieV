@@ -4,3 +4,4 @@
 .vscode/launch.json
 .vscode/ipch
 src/build_version.h
+wifi_credentials.h

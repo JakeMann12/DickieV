@@ -8,6 +8,7 @@ PlatformIO extra_scripts run in SCons context; use `Import('env')` to get the
 build environment and `env.subst("$PROJECT_DIR")` for the project path.
 """
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -55,14 +56,51 @@ print(f"Build number injected: BUILD_NUMBER={build_number}")
 # of special characters in passwords is needed.
 MAX_WIFI_NETWORKS = 8
 
+WIFI_CREDENTIALS_HEADER = PROJECT_DIR / "include" / "wifi_credentials.h"
+
+
+def get_wifi_credentials_from_header() -> str:
+    """Parse SSID|PASSWORD pairs from include/wifi_credentials.h.
+
+    Expected entry format (one per line):  {"SSID", "PASSWORD"},
+    Returns the same "SSID|PASSWORD\\nSSID|PASSWORD" string format used by
+    WIFI_SECRETS, or an empty string if the file is missing or has no entries.
+    """
+    if not WIFI_CREDENTIALS_HEADER.is_file():
+        return ""
+    entries = []
+    text = WIFI_CREDENTIALS_HEADER.read_text(encoding="utf-8")
+    pattern = re.compile(r'\{\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\}')
+    for match in pattern.finditer(text):
+        ssid = match.group(1).strip()
+        password = match.group(2).strip()
+        if ssid and password:
+            entries.append(f"{ssid}|{password}")
+    if len(entries) > MAX_WIFI_NETWORKS:
+        raise SystemExit(
+            f"ERROR: wifi_credentials.h has more than {MAX_WIFI_NETWORKS} networks."
+        )
+    return "\n".join(entries)
+
 
 def get_wifi_secrets() -> str:
     data = os.environ.get("WIFI_SECRETS", "").strip()
     if not data:
+        header_data = get_wifi_credentials_from_header()
+        if header_data:
+            count = len(header_data.splitlines())
+            print(
+                f"INFO: WIFI_SECRETS not set; falling back to "
+                f"include/wifi_credentials.h ({count} network(s))"
+            )
+            return header_data
         msg = "WIFI_SECRETS is empty or unset; firmware will have no WiFi networks."
         if os.environ.get("GITHUB_ACTIONS") == "true":
             raise SystemExit(f"ERROR: {msg} Add the secret in the repository settings.")
-        print(f"WARNING: {msg} Set $env:WIFI_SECRETS = 'SSID|PASSWORD' for local builds.")
+        print(
+            f"WARNING: {msg} Set $env:WIFI_SECRETS = 'SSID|PASSWORD' for local builds, "
+            f"or populate include/wifi_credentials.h."
+        )
         return ""
 
     entries = []

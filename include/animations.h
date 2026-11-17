@@ -245,12 +245,15 @@ inline BigChunk loadChunk(hd44780_pinIO& lcd, const char* letters, uint8_t base)
 }
 
 // Devil always lives in slots 0-3 (TL, TR, BL, BR).
+// Restore all sprite slots afterward so the devil doesn't clobber
+// the runner/ball/hoop animations that share CGRAM.
 inline void loadDevil(hd44780_pinIO& lcd, bool mirrored) {
   for (uint8_t t = 0; t < 4; t++) {
     uint8_t tile[8];
     sliceTile(BIG_DEVIL, mirrored, t & 1, t >> 1, tile);
     lcd.createChar(t, tile);
   }
+  initDunkSprites(lcd);
 }
 
 inline void drawCell(hd44780_pinIO& lcd, int col, uint8_t row, uint8_t code) {
@@ -366,6 +369,10 @@ inline void bigWordAnimation(hd44780_pinIO& lcd, const HypeWord& w,
   }
 
   lcd.clear();
+
+  // The hype word took over CGRAM slots; restore the dunk/three sprites
+  // so subsequent sprite animations draw correctly.
+  initDunkSprites(lcd);
 }
 
 // Cycles DUKE -> DDMF -> GTHC each time it's called
