@@ -77,6 +77,42 @@ PowerShell's quote-escaping mangles `-c` strings. Write a `.py` file and run it:
 python c:\tmp\inspect.py
 ```
 
+### Rule 8: No Unix utilities (`head`, `tail`, `ls -la`, `grep`) in PowerShell
+PowerShell does **not** have `head`, `tail`, or `ls -la`. `ls` is just an alias for `Get-ChildItem` and rejects Unix flags like `-la`.
+
+| Instead of (Unix) | Use (PowerShell) |
+|---|---|
+| `head -n 20 file` | `Get-Content file -TotalCount 20` |
+| `tail -n 20 file` | `Get-Content file -Tail 20` |
+| `ls -la` | `dir` or `Get-ChildItem -Force` |
+| `grep "pattern" file` | `Select-String "pattern" file` |
+
+```powershell
+# WRONG — breaks in PowerShell:
+git show c88895e -- include/animations.h \| head -100
+ls -la .vscode
+
+# CORRECT:
+git show c88895e -- include/animations.h \| Select-Object -First 100
+dir .vscode
+```
+
+### Rule 9: `pio` / `platformio` CLI IS installed
+The `pio.exe` executable **is** on this machine's PATH at `C:\Users\jmann\.platformio\penv\Scripts`. Running `pio run` or `platformio run` works directly.
+
+You may run `pio` or `platformio` directly (e.g. `pio run --project-dir .`). Prefer `--project-dir` over `-C` (see Rule 2) and use `;` as the shell separator in PowerShell (see Rule 1).
+
+### Rule 10: `cd ... && ...` chains fail even with single quotes
+Even wrapping paths in single quotes does not make `&&` valid in PowerShell. Always split into separate commands with `;`:
+
+```powershell
+# WRONG:
+cd 'C:\path' && dir
+
+# CORRECT:
+cd 'C:\path'; dir
+```
+
 ---
 
 ## 2. Reusable Setup Helper
@@ -165,8 +201,7 @@ When working on `checkForUpdate()` or any OTA-related code:
 
 `FIRMWARE_VERSION` in `src/main.cpp` follows semantic versioning: `MAJOR.MINOR.PATCH` (e.g. `1.0.0`).
 
-The LCD splash displays versions as `vMAJOR.MINOR.PATCH bBUILD` where `BUILD` is the git commit count
-(`git rev-list --count HEAD`), injected at compile time by `scripts/pre_build.py`.
+The LCD splash displays versions as `vMAJOR.MINOR.PATCH` (the firmware release tag from GitHub).
 
 ### 6.2. Bumping the Version
 
@@ -197,10 +232,9 @@ python .agent/bump_version.py --new 1.2.3  # explicit version
 
 ### 6.4. LCD Version Display
 
-The version splash now shows: `v<major>.<minor>.<patch> b<build>`
+The version splash now shows: `v<major>.<minor>.<patch>`
 
-Example: `v1.0.0 b26`
+Example: `v1.0.0`
 
-The build number comes from `git rev-list --count HEAD` and is injected at compile time by
-`scripts/pre_build.py` writing `src/build_version.h`. Do not commit `build_version.h` — it is
-generated on every build.
+The version comes from `FIRMWARE_VERSION` in `src/main.cpp`, which is synced to the GitHub
+release tag on CI builds. No build/commit number is displayed.

@@ -10,16 +10,14 @@
 #include <time.h>
 #include "phrases.h"
 #include "animations.h"
-#include "build_version.h"
-
 const char* HOST = "site.api.espn.com";
 const char* PATH = "/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups=50&limit=400&dates=";
 const char* TEAM = "DUKE";
 const unsigned long GAME_START_CHECK_INTERVAL_MS = 15UL * 1000UL;
 const unsigned long COUNTDOWN_TICK_MS = 1000UL;
 
-// Firmware version (light versioning — bump on each release).
-const char* FIRMWARE_VERSION = "1.0.0";
+// Firmware release number (GitHub release tag / run number — e.g. "24").
+const char* FIRMWARE_VERSION = "0";
 
 // Button wired from D4 to GND. Uses the internal pullup so the pin reads
 // HIGH when open and LOW when the button is pressed.
@@ -394,7 +392,7 @@ void fetchScore() {
 
   cachedGameStartIso = "";
   writeBootCache(makePstDateString(), WiFi.SSID(), cachedGameStartIso);
-  showOnLcd("No Duke game", String("today v") + String(FIRMWARE_VERSION) + " b" + String(BUILD_NUMBER));
+  showOnLcd("No Duke game", String("today v") + String(FIRMWARE_VERSION));
 }
 
 // Very simple semver compare (handles tags like "v1.2.3").
@@ -485,7 +483,7 @@ bool checkForUpdate() {
   Serial.printf("Current: %s | Latest: %s\n", FIRMWARE_VERSION, latestTag.c_str());
 
   if (!isNewerVersion(latestTag, FIRMWARE_VERSION)) {
-    showOnLcd("Up to date", "v" + String(FIRMWARE_VERSION) + " b" + String(BUILD_NUMBER));
+    showOnLcd("Up to date", "v" + String(FIRMWARE_VERSION));
     delay(1200);
     Serial.println("No update needed");
     return false;
@@ -548,7 +546,7 @@ void setup() {
   flashThreeAnimation(lcd);
 
   // Brief version splash so you can see which firmware is running.
-  showOnLcd("DickieV", "v" + String(FIRMWARE_VERSION) + " b" + String(BUILD_NUMBER));
+  showOnLcd("DickieV", "v" + String(FIRMWARE_VERSION));
   delay(1000);
 
   // Kick off the WiFi connection attempt in the background. The startup hype
