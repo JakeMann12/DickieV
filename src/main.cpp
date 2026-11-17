@@ -34,7 +34,11 @@ static const uint32_t BOOT_CACHE_MAGIC = 0x44524456u;
 static String cachedGameStartIso;
 static unsigned long lastGameStartCheckMs = 0;
 static unsigned long lastCountdownRefreshMs = 0;
+static unsigned long lastNoGameHypeMs = 0;
 static BootCache bootCache = {};
+
+// How often to cycle the hype animations when there's no Duke game today.
+const unsigned long NO_GAME_HYPE_INTERVAL_MS = 120UL * 1000UL;
 
 // Button debounce state.
 static unsigned long lastButtonCheckMs = 0;
@@ -620,6 +624,18 @@ void loop() {
         nowMs - lastCountdownRefreshMs >= COUNTDOWN_TICK_MS) {
       lastCountdownRefreshMs = nowMs;
       refreshCountdownDisplay();
+    }
+
+    // When there's no Duke game today, cycle through all three hype
+    // animations (DUKE -> DDMF -> GTHC) every 120 seconds, then restore
+    // the "No Duke game" message.
+    if (cachedGameStartIso.length() == 0 &&
+        nowMs - lastNoGameHypeMs >= NO_GAME_HYPE_INTERVAL_MS) {
+      lastNoGameHypeMs = nowMs;
+      preGameHype(lcd);
+      preGameHype(lcd);
+      preGameHype(lcd);
+      showOnLcd("No Duke game", String("today v") + String(FIRMWARE_VERSION));
     }
 
     // Periodic OTA update check (hourly).
