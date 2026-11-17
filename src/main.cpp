@@ -120,6 +120,9 @@ static long secondsUntil(const String& iso) {
 }
 
 static String makePstDateString();
+static String scanDukeGamesForDate(const String& dateKey, String& scoreLine1, String& scoreDetail, bool& foundLiveOrFinal);
+static String findNextDukeGame();
+static String formatDayCountdown(const String& iso);
 
 static String makePstDateKeyFromUtc(time_t utcEpoch) {
   time_t pstEpoch = utcEpoch - (8 * 3600L);
@@ -303,26 +306,100 @@ static void refreshCountdownDisplay() {
   if (cachedGameStartIso.length() == 0) return;
 
   String line1 = "DUKE @ " + formatPstTime(cachedGameStartIso);
-  String line2 = formatCountdown(cachedGameStartIso);
+  String line2 = formatDayCountdown(cachedGameStartIso);
+
+  // Avoid rewriting the LCD every second when the text hasn't changed
+  // (important for the day countdown, which stays static for long stretches).
+  static String lastLine1;
+  static String lastLine2;
+  if (line1 == lastLine1 && line2 == lastLine2) return;
+  lastLine1 = line1;
+  lastLine2 = line2;
+
   showOnLcd(line1, line2);
 }
 
 void fetchScore() {
+  String todayKey = makePstDateString();
+  String scoreLine1, scoreDetail;
+  bool foundLiveOrFinal = false;
+  String upcomingIso = scanDukeGamesForDate(todayKey, scoreLine1, scoreDetail, foundLiveOrFinal);
+
+  Serial.printf("requestDate=%s\n", todayKey.c_str());
+
+  // An upcoming Duke game today takes priority over any cached future game.
+  if (upcomingIso.length() > 0) {
+    cachedGameStartIso = upcomingIso;
+    writeBootCache(todayKey, WiFi.SSID(), cachedGameStartIso);
+    long secs = secondsUntil(upcomingIso);
+    if (secs > 0 && secs <= 120) {
+      preGameHype(lcd);
+    }
+    String line1 = "DUKE @ " + formatPstTime(upcomingIso);
+    String line2 = formatCountdown(upcomingIso);
+    showOnLcd(line1, line2);
+    return;
+  }
+
+  // A Duke game today that is live or final — show the score.
+  if (foundLiveOrFinal) {
+    writeBootCache(todayKey, WiFi.SSID(), "");
+    cachedGameStartIso = "";
+    showOnLcd(scoreLine1, scoreDetail);
+    return;
+  }
+
+  // No upcoming Duke game today. Keep a cached future game if its day has not
+  // passed yet; otherwise clear the stale cache and look ahead.
+  if (cachedGameStartIso.length() > 0) {
+    String cachedDateKey = makePstDateKeyFromUtc(parseIsoUtc(cachedGameStartIso));
+    if (cachedDateKey.length() > 0 && cachedDateKey < todayKey) {
+      cachedGameStartIso = "";  // game day passed; look ahead below
+    } else {
+      refreshCountdownDisplay();
+      return;
+    }
+  }
+
+  // Look ahead for the next Duke game (only when nothing is cached yet).
+  String nextIso = findNextDukeGame();
+  if (nextIso.length() > 0) {
+    cachedGameStartIso = nextIso;
+    writeBootCache(todayKey, WiFi.SSID(), cachedGameStartIso);
+    refreshCountdownDisplay();
+    return;
+  }
+
+  cachedGameStartIso = "";
+  writeBootCache(todayKey, WiFi.SSID(), "");
+  showOnLcd("No Duke game", String("today v") + String(FIRMWARE_VERSION));
+}
+
+
+static String scanDukeGamesForDate(const String& dateKey,
+                                   String& scoreLine1,
+                                   String& scoreDetail,
+                                   bool& foundLiveOrFinal) {
   WiFiClientSecure client;
   client.setInsecure();
   client.setBufferSizes(1024, 512);
 
+  scoreLine1 = "";
+  scoreDetail = "";
+  foundLiveOrFinal = false;
+
   if (!client.connect(HOST, 443)) {
-    showOnLcd("Connect fail", "");
-    return;
+    Serial.println("Connect fail (scan)");
+    return "";
   }
 
-  String requestPath = String(PATH) + makePstDateString();
+  String requestPath = String(PATH) + dateKey;
   client.print(String("GET ") + requestPath + " HTTP/1.0\r\nHost: " + HOST +
                "\r\nConnection: close\r\n\r\n");
   if (!client.find("\r\n\r\n")) {
-    showOnLcd("Bad response", "");
-    return;
+    Serial.println("Bad response (scan)");
+    client.stop();
+    return "";
   }
 
   JsonDocument filter;
@@ -344,21 +421,23 @@ void fetchScore() {
     client,
     DeserializationOption::Filter(filter),
     DeserializationOption::NestingLimit(32));
+  client.stop();
   if (err) {
-    showOnLcd("JSON err", err.c_str());
-    return;
+    Serial.printf("JSON err (scan): %s\n", err.c_str());
+    return "";
   }
 
-  Serial.printf("requestDate=%s\n", makePstDateString().c_str());
+  String upcomingIso = "";
 
   for (JsonObject ev : doc["events"].as<JsonArray>()) {
-    JsonArray comps = ev["competitions"][0]["competitors"];
+    JsonArray evComps = ev["competitions"][0]["competitors"];
     String gameStart = ev["competitions"][0]["startDate"] | "";
 
     bool hasDuke = false;
-    for (JsonObject c : comps) {
+    for (JsonObject c : evComps) {
       if (String(c["team"]["abbreviation"] | "") == TEAM) {
         hasDuke = true;
+        break;
       }
     }
     if (!hasDuke) {
@@ -366,37 +445,76 @@ void fetchScore() {
     }
 
     String status = ev["status"]["type"]["state"] | "";
-    Serial.printf("dukeEvent state=%s start=%s\n", status.c_str(), gameStart.c_str());
+    Serial.printf("dukeEvent date=%s state=%s start=%s\n", dateKey.c_str(), status.c_str(), gameStart.c_str());
+
     if (status == "pre" || status == "scheduled") {
-      cachedGameStartIso = gameStart;
-      writeBootCache(makePstDateString(), WiFi.SSID(), cachedGameStartIso);
-      long secs = secondsUntil(gameStart);
-      if (secs > 0 && secs <= 120) {
-        preGameHype(lcd);
+      if (upcomingIso.length() == 0) {
+        upcomingIso = gameStart;
       }
-      String line1 = "DUKE @ " + formatPstTime(gameStart);
-      String line2 = formatCountdown(gameStart);
-      showOnLcd(line1, line2);
-      return;
+      continue;
     }
 
-    cachedGameStartIso = "";
-    writeBootCache(makePstDateString(), WiFi.SSID(), cachedGameStartIso);
-
-    String line1 = "";
-    for (JsonObject c : comps) {
-      if (line1.length()) {
-        line1 += " ";
+    // Live or final Duke game today — capture score summary (first one).
+    if (!foundLiveOrFinal) {
+      foundLiveOrFinal = true;
+      String line1 = "";
+      for (JsonObject c : evComps) {
+        if (line1.length()) {
+          line1 += " ";
+        }
+        line1 += String(c["team"]["abbreviation"] | "?") + " " + String(c["score"] | "0");
       }
-      line1 += String(c["team"]["abbreviation"] | "?") + " " + String(c["score"] | "0");
+      scoreLine1 = line1;
+      scoreDetail = ev["status"]["type"]["shortDetail"] | "";
     }
-    showOnLcd(line1, ev["status"]["type"]["shortDetail"] | "");
-    return;
   }
 
-  cachedGameStartIso = "";
-  writeBootCache(makePstDateString(), WiFi.SSID(), cachedGameStartIso);
-  showOnLcd("No Duke game", String("today v") + String(FIRMWARE_VERSION));
+  return upcomingIso;
+}
+
+static const int MAX_LOOKAHEAD_DAYS = 14;
+
+static String makePstDateKeyPlusDays(int daysOffset) {
+  time_t nowUtc = time(nullptr);
+  time_t target = nowUtc + (long)daysOffset * 86400L;
+  return makePstDateKeyFromUtc(target);
+}
+
+static String findNextDukeGame() {
+  for (int offset = 1; offset <= MAX_LOOKAHEAD_DAYS; ++offset) {
+    String dateKey = makePstDateKeyPlusDays(offset);
+    String scoreLine1, scoreDetail;
+    bool foundLiveOrFinal = false;
+    String upcomingIso = scanDukeGamesForDate(dateKey, scoreLine1, scoreDetail, foundLiveOrFinal);
+    if (upcomingIso.length() > 0) {
+      return upcomingIso;
+    }
+  }
+  return "";
+}
+
+static String formatDayCountdown(const String& iso) {
+  time_t startUtc = parseIsoUtc(iso);
+  if (startUtc == 0) return "TBD";
+
+  time_t nowUtc = time(nullptr);
+  long diff = startUtc - nowUtc;
+  if (diff < 0) return "LIVE";
+
+  long days = diff / 86400;
+  if (days >= 1) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "in %ld days", days);
+    return String(buf);
+  }
+
+  // Less than 24 hours away: show a ticking hours:minutes:seconds countdown.
+  long hours = diff / 3600;
+  long minutes = (diff % 3600) / 60;
+  long seconds = diff % 60;
+  char buf[16];
+  snprintf(buf, sizeof(buf), "T-%02ld:%02ld:%02ld", hours, minutes, seconds);
+  return String(buf);
 }
 
 // Very simple semver compare (handles tags like "v1.2.3").
