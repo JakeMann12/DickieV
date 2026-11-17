@@ -396,7 +396,7 @@ inline void scrollTextLine(hd44780_pinIO& lcd, uint8_t row, const String& text,
                            uint16_t startHoldMs = 1200,
                            uint16_t stepMs = 250,
                            uint16_t endHoldMs = 1000) {
-  int len = text.length();
+  size_t len = text.length();
 
   // Fits on one line: just show it
   if (len <= 16) {
@@ -411,7 +411,9 @@ inline void scrollTextLine(hd44780_pinIO& lcd, uint8_t row, const String& text,
   delay(startHoldMs);
 
   // 2. Scroll one character at a time
-  for (int offset = 1; offset <= len - 16; offset++) {
+  // len > 16 here (guaranteed by early return above), so len - 16 >= 1
+  // and offset + 16 never exceeds len. No unsigned underflow possible.
+  for (size_t offset = 1; offset <= len - 16; offset++) {
     lcd.setCursor(0, row);
     lcd.print(text.substring(offset, offset + 16));
     delay(stepMs);
