@@ -122,7 +122,6 @@ static long secondsUntil(const String& iso) {
 static String makePstDateString();
 static String scanDukeGamesForDate(const String& dateKey, String& scoreLine1, String& scoreDetail, bool& foundLiveOrFinal);
 static String findNextDukeGame();
-static String formatDayCountdown(const String& iso);
 
 static String makePstDateKeyFromUtc(time_t utcEpoch) {
   time_t pstEpoch = utcEpoch - (8 * 3600L);
@@ -140,26 +139,6 @@ static String makePstDateKeyFromUtc(time_t utcEpoch) {
   }
 
   return year + month + day;
-}
-
-static bool isDukeGameToday(const String& iso) {
-  time_t startUtc = parseIsoUtc(iso);
-  if (startUtc == 0) return false;
-
-  return makePstDateKeyFromUtc(startUtc) == makePstDateString();
-}
-
-static bool isDukeEventForToday(const JsonObject& ev) {
-  JsonArray comps = ev["competitions"][0]["competitors"];
-  String gameStart = ev["competitions"][0]["startDate"] | "";
-
-  for (JsonObject c : comps) {
-    if (String(c["team"]["abbreviation"] | "") == TEAM) {
-      return isDukeGameToday(gameStart);
-    }
-  }
-
-  return false;
 }
 
 static String makePstDateString() {
@@ -306,10 +285,10 @@ static void refreshCountdownDisplay() {
   if (cachedGameStartIso.length() == 0) return;
 
   String line1 = "DUKE @ " + formatPstTime(cachedGameStartIso);
-  String line2 = formatDayCountdown(cachedGameStartIso);
+  String line2 = formatCountdown(cachedGameStartIso);
 
-  // Avoid rewriting the LCD every second when the text hasn't changed
-  // (important for the day countdown, which stays static for long stretches).
+  // The countdown ticks every second, so only rewrite the LCD when the text
+  // actually changes (e.g. the game start time was updated under the hood).
   static String lastLine1;
   static String lastLine2;
   if (line1 == lastLine1 && line2 == lastLine2) return;
@@ -493,29 +472,7 @@ static String findNextDukeGame() {
   return "";
 }
 
-static String formatDayCountdown(const String& iso) {
-  time_t startUtc = parseIsoUtc(iso);
-  if (startUtc == 0) return "TBD";
 
-  time_t nowUtc = time(nullptr);
-  long diff = startUtc - nowUtc;
-  if (diff < 0) return "LIVE";
-
-  long days = diff / 86400;
-  if (days >= 1) {
-    char buf[16];
-    snprintf(buf, sizeof(buf), "in %ld days", days);
-    return String(buf);
-  }
-
-  // Less than 24 hours away: show a ticking hours:minutes:seconds countdown.
-  long hours = diff / 3600;
-  long minutes = (diff % 3600) / 60;
-  long seconds = diff % 60;
-  char buf[16];
-  snprintf(buf, sizeof(buf), "T-%02ld:%02ld:%02ld", hours, minutes, seconds);
-  return String(buf);
-}
 
 // Very simple semver compare (handles tags like "v1.2.3").
 // Example: 1.10.0 > 1.9.0
