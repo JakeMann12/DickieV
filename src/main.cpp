@@ -13,8 +13,13 @@
 #include "wifi_debug.h"
 const char* HOST = "site.api.espn.com";
 const char* PATH = "/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups=50&limit=400&dates=";
+// Full-season Duke schedule (includes today's game). One small request instead
+// of scanning a ~1MB all-D1 scoreboard per day, which often failed on-device.
+const char* SCHEDULE_PATH = "/apis/site/v2/sports/basketball/mens-college-basketball/teams/duke/schedule";
 const char* TEAM = "DUKE";
 const unsigned long GAME_START_CHECK_INTERVAL_MS = 30UL * 1000UL;
+// How often a cached future game is re-validated against the schedule.
+const unsigned long SCHEDULE_RECHECK_INTERVAL_MS = 60UL * 60UL * 1000UL;
 // How often the countdown text is re-evaluated. The LCD is only rewritten when
 // the displayed text actually changes (i.e. once per second).
 const unsigned long COUNTDOWN_TICK_MS = 200UL;
@@ -43,6 +48,7 @@ static String cachedGameStartIso;
 // Opponent label for the cached game, e.g. "vs UNC" (home) or "@ UVA" (away).
 static String cachedOpponent;
 static unsigned long lastGameStartCheckMs = 0;
+static unsigned long lastScheduleCheckMs = 0;
 static unsigned long lastCountdownRefreshMs = 0;
 static unsigned long lastNoGameHypeMs = 0;
 static BootCache bootCache = {};
@@ -137,7 +143,16 @@ static long secondsUntil(const String& iso) {
 
 static String makePstDateString();
 static String scanDukeGamesForDate(const String& dateKey, String& scoreLine1, String& scoreDetail, bool& foundLiveOrFinal, String& opponent);
-static String findNextDukeGame(String& opponent);
+static bool findNextDukeGame(String& gameStartIso, String& opponent);
+
+// "vs UNC" / "@ UVA", with the ESPN abbreviation trimmed only as far as needed
+// for matchupLine() to fit on one 16-char LCD row.
+static String opponentLabel(const String& abbr, bool away) {
+  if (abbr.length() == 0) return "";
+  String prefix = away ? "@ " : "vs ";
+  int room = 16 - 5 - (int)prefix.length();  // 5 = "DUKE "
+  return prefix + abbr.substring(0, room);
+}
 
 static String matchupLine(const String& opponent) {
   return opponent.length() > 0 ? "DUKE " + opponent : String("DUKE game");
@@ -407,21 +422,32 @@ void fetchScore() {
     return;
   }
 
-  // No upcoming Duke game today. Keep a cached future game if its day has not
-  // passed yet; otherwise clear the stale cache and look ahead.
-  if (cachedGameStartIso.length() > 0) {
-    String cachedDateKey = makePstDateKeyFromUtc(parseIsoUtc(cachedGameStartIso));
-    if (cachedDateKey.length() > 0 && cachedDateKey < todayKey) {
-      cachedGameStartIso = "";  // game day passed; look ahead below
-    } else {
+  // Nothing from today's scoreboard (or that fetch failed). Drop a cached game
+  // whose start time has passed, then consult the team schedule when nothing
+  // is cached or the cache is due for re-validation.
+  if (cachedGameStartIso.length() > 0 && secondsUntil(cachedGameStartIso) < 0) {
+    cachedGameStartIso = "";
+  }
+
+  bool scheduleDue = lastScheduleCheckMs == 0 ||
+                     millis() - lastScheduleCheckMs >= SCHEDULE_RECHECK_INTERVAL_MS;
+  if (cachedGameStartIso.length() > 0 && !scheduleDue) {
+    refreshCountdownDisplay();
+    return;
+  }
+
+  String nextIso, nextOpponent;
+  if (!findNextDukeGame(nextIso, nextOpponent)) {
+    // Fetch failed: keep whatever we had rather than guessing.
+    if (cachedGameStartIso.length() > 0) {
       refreshCountdownDisplay();
       return;
     }
+    showOnLcd("No Duke game", String("today v") + String(FIRMWARE_VERSION));
+    return;
   }
+  lastScheduleCheckMs = millis();
 
-  // Look ahead for the next Duke game (only when nothing is cached yet).
-  String nextOpponent;
-  String nextIso = findNextDukeGame(nextOpponent);
   if (nextIso.length() > 0) {
     cachedGameStartIso = nextIso;
     cachedOpponent = nextOpponent;
@@ -516,8 +542,6 @@ static String scanDukeGamesForDate(const String& dateKey,
     if (status == "pre" || status == "scheduled") {
       if (upcomingIso.length() == 0) {
         upcomingIso = gameStart;
-        // Short ESPN abbreviation (e.g. "UNC"), capped so "DUKE vs XXXXXX"
-        // always fits on one 16-char LCD row.
         bool dukeAway = false;
         String oppAbbr = "";
         for (JsonObject c : evComps) {
@@ -529,9 +553,7 @@ static String scanDukeGamesForDate(const String& dateKey,
           }
         }
         bool neutral = ev["competitions"][0]["neutralSite"] | false;
-        if (oppAbbr.length() > 0) {
-          opponent = String(dukeAway && !neutral ? "@ " : "vs ") + oppAbbr.substring(0, 6);
-        }
+        opponent = opponentLabel(oppAbbr, dukeAway && !neutral);
       }
       continue;
     }
@@ -554,25 +576,84 @@ static String scanDukeGamesForDate(const String& dateKey,
   return upcomingIso;
 }
 
-static const int MAX_LOOKAHEAD_DAYS = 14;
+// Returns false on network/parse failure. On success, gameStartIso is the
+// earliest not-yet-started Duke game (empty if none remain this season).
+static bool findNextDukeGame(String& gameStartIso, String& opponent) {
+  gameStartIso = "";
+  opponent = "";
 
-static String makePstDateKeyPlusDays(int daysOffset) {
-  time_t nowUtc = time(nullptr);
-  time_t target = nowUtc + (long)daysOffset * 86400L;
-  return makePstDateKeyFromUtc(target);
-}
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setBufferSizes(1024, 512);
 
-static String findNextDukeGame(String& opponent) {
-  for (int offset = 1; offset <= MAX_LOOKAHEAD_DAYS; ++offset) {
-    String dateKey = makePstDateKeyPlusDays(offset);
-    String scoreLine1, scoreDetail;
-    bool foundLiveOrFinal = false;
-    String upcomingIso = scanDukeGamesForDate(dateKey, scoreLine1, scoreDetail, foundLiveOrFinal, opponent);
-    if (upcomingIso.length() > 0) {
-      return upcomingIso;
-    }
+  if (!client.connect(HOST, 443)) {
+    Serial.println("Connect fail (schedule)");
+    return false;
   }
-  return "";
+
+  client.print(String("GET ") + SCHEDULE_PATH + " HTTP/1.0\r\nHost: " + HOST +
+               "\r\nConnection: close\r\n\r\n");
+  if (!client.find("\r\n\r\n")) {
+    Serial.println("Bad response (schedule)");
+    client.stop();
+    return false;
+  }
+
+  JsonDocument filter;
+  JsonObject f = filter["events"][0].to<JsonObject>();
+  f["date"] = true;
+  JsonObject fc = f["competitions"][0].to<JsonObject>();
+  fc["neutralSite"] = true;
+  fc["status"]["type"]["state"] = true;
+  JsonObject fcomp = fc["competitors"][0].to<JsonObject>();
+  fcomp["homeAway"] = true;
+  fcomp["team"]["abbreviation"] = true;
+
+  JsonDocument doc;
+  CountdownTickingStream tickingClient(client);
+  DeserializationError err = deserializeJson(
+    doc,
+    tickingClient,
+    DeserializationOption::Filter(filter),
+    DeserializationOption::NestingLimit(32));
+  client.stop();
+  if (err) {
+    Serial.printf("JSON err (schedule): %s\n", err.c_str());
+    return false;
+  }
+
+  time_t bestStart = 0;
+  for (JsonObject ev : doc["events"].as<JsonArray>()) {
+    JsonObject comp = ev["competitions"][0];
+    String state = comp["status"]["type"]["state"] | "";
+    if (state != "pre") {
+      continue;
+    }
+    String iso = ev["date"] | "";
+    time_t start = parseIsoUtc(iso);
+    if (start == 0 || (bestStart != 0 && start >= bestStart)) {
+      continue;
+    }
+
+    bool dukeAway = false;
+    String oppAbbr = "";
+    for (JsonObject c : comp["competitors"].as<JsonArray>()) {
+      String abbr = c["team"]["abbreviation"] | "";
+      if (abbr == TEAM) {
+        dukeAway = String(c["homeAway"] | "") == "away";
+      } else {
+        oppAbbr = abbr;
+      }
+    }
+    bool neutral = comp["neutralSite"] | false;
+
+    bestStart = start;
+    gameStartIso = iso;
+    opponent = opponentLabel(oppAbbr, dukeAway && !neutral);
+  }
+
+  Serial.printf("nextDukeGame start=%s opp=%s\n", gameStartIso.c_str(), opponent.c_str());
+  return true;
 }
 
 
