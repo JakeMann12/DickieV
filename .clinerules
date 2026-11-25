@@ -1,0 +1,9 @@
+# DickieV agent rules
+
+Before doing anything, read `.agent/AGENT_INSTRUCTIONS.md` in full and follow it.
+
+Most important:
+- The shell is Windows PowerShell. Separate commands with `;`, never `&&`.
+- After any code change, run `powershell -ExecutionPolicy Bypass -File .agent\build.ps1`. You are done only when it prints `BUILD PASSED`.
+- Never hard-code `C:\Users\<name>` paths. Use repo-relative paths or `$env:USERPROFILE`.
+- Never edit `FIRMWARE_VERSION`. Never commit secrets or `.pio/`.

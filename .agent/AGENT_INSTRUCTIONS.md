@@ -1,305 +1,137 @@
-# Agent Instructions — DickieV ESP8266 Project
+# Agent Instructions - DickieV
 
-## LOCATION & SCOPE
-- **This file:** `.agent/AGENT_INSTRUCTIONS.md` — **read-only for agents.**
-- **Never** include `.agent/` files in firmware builds. `.agent/` is **not** part of the ESP8266 source tree and must **never** be added to `src/`, `include/`, or any compiled output.
-- This file is the **single source of truth** for agent behavior. If this file and a shell session conflict, this file wins.
+Read this whole file before you change anything. It is short on purpose.
 
----
+## 1. What this project is
 
-## MANDATORY FIRST STEPS (do these before ANY work, every session)
+DickieV is firmware for an ESP8266 (ESP-12E) board with a 16x2 LCD.
+It pulls Duke men's basketball games from the ESPN API over WiFi and shows:
+- a live score during a game
+- a ticking countdown (`T-HH:MM:SS`) before a game
+- hype animations when there is no game today
 
-1. **Read this file in full.** Do not skip sections.
-2. **Read `src/main.cpp` header block (lines 1–60)** to confirm `TEAM`, `COUNTDOWN_TICK_MS`, `GAME_START_CHECK_INTERVAL_MS`, `FIRMWARE_VERSION`, and pin mappings match the project context below.
-3. **Verify the build toolchain:** run `.agent\setup_env.ps1` or confirm `pio.exe` is on PATH.
-4. **Check git status:** `git status` and `git log --oneline -5` to know what changed before you.
-5. **After any edit to `src/`:** rebuild with `pio run --project-dir .` and confirm **zero warnings and zero errors** before declaring done.
+It also updates itself over WiFi (OTA) from GitHub Releases.
 
-If you cannot confirm items 1–4, stop and re-read this file. Do not guess.
+## 2. The 5 rules (follow every time)
 
----
+1. **Build after every code change:**
+   `powershell -ExecutionPolicy Bypass -File .agent\build.ps1`
+   You are done only when it prints `BUILD PASSED`. If it prints `BUILD FAILED`, fix the issue and build again.
+2. **Never hard-code a user folder.** This repo is used on two PCs (`C:\Users\jmann` and `C:\Users\jake.mann`). Use paths relative to the repo, or `$env:USERPROFILE`.
+3. **Never change `FIRMWARE_VERSION` by hand.** CI sets it (see section 7).
+4. **Never commit secrets or build output.** Do not commit `.pio/`, `include/wifi_credentials.h`, or any WiFi passwords.
+5. **Keep changes small.** Change only what the task needs. Do not reformat or reorder code you are not changing.
 
-## PROJECT CONTEXT (so you never re-read the whole codebase)
+## 3. Shell rules (Windows PowerShell)
 
-### What this is
-DickieV is an **ESP8266 (ESP-12E) Arduino firmware** project that displays a Duke basketball countdown on a character LCD. It polls the ESPN scoreboard API over WiFi, caches the next Duke game start time in EEPROM, and shows a ticking `T-HH:MM:SS` countdown until game time.
+The terminal is **PowerShell**, not bash. Common mistakes:
 
-### Platform / Build
-- Platform: `espressif8266`, board: `esp12e`, framework: `arduino`, CPU: 160MHz
-- Build system: **PlatformIO** (`pio.exe` / `platformio.exe` on PATH)
-- Project root: `c:\Users\jmann\Documents\DickieV\DickieV`
-- `platformio.ini` lives at project root; `lib_deps`: ArduinoJson ^7, hd44780 ^1.3.2
-- Pre-build script: `scripts/pre_build.py` injects WiFi secrets from `WIFI_SECRETS_BYTES` env var, falling back to `include/wifi_credentials.h`
-- Build artifacts go to `.pio\build\esp12e\` — **never** commit `.pio/`
+| Do NOT write | Write instead |
+|---|---|
+| `cd x && pio run` | `cd x; pio run` |
+| `cmd1 \|\| cmd2` | Run them as two separate commands |
+| `pio run -C .` | `pio run --project-dir .` (or just use `.agent\build.ps1`) |
+| `head -n 20 file` | `Get-Content file -TotalCount 20` |
+| `tail -n 20 file` | `Get-Content file -Tail 20` |
+| `grep text file` | `Select-String -Path file -Pattern text` |
+| `ls -la` | `Get-ChildItem -Force` |
+| `cat file` | `Get-Content file` |
+| `git log` / `git diff` (can hang in a pager) | `git --no-pager log --oneline -5` / `git --no-pager diff` |
+| `python -c "...complex quotes..."` | Write a `.py` file, then run `python file.py` |
 
-### Key source file
-- **`src/main.cpp`** — the only firmware source file. Everything lives here.
-- Include order (do not reorder): `Arduino.h`, `ESP8266WiFi.h`, `WiFiClientSecure.h`, `ESP8266HTTPClient.h`, `ESP8266httpUpdate.h`, `EEPROM.h`, `ArduinoJson.h`, `hd44780.h`, `hd44780ioClass/hd44780_pinIO.h`, `time.h`, `phrases.h`, `animations.h`
+`pio` may **not** be on PATH. `.agent\build.ps1` finds it for you. If you must call it directly, use:
+`& "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run --project-dir .`
 
-### Key constants (defined at top of `src/main.cpp`)
-| Constant | Value | Meaning |
+## 4. Files
+
+| Path | What it is | Edit? |
 |---|---|---|
-| `TEAM` | `"DUKE"` | Team abbreviation filtered from ESPN API |
-| `COUNTDOWN_TICK_MS` | `1000UL` | LCD countdown refresh interval (1 second) |
-| `GAME_START_CHECK_INTERVAL_MS` | `15UL * 1000UL` | Under-the-hood ESPN re-check interval (15 s) |
-| `FIRMWARE_VERSION` | `"0"` | Displayed on LCD splash |
-| `BUTTON_PIN` | `D4` | Button to GND, INPUT_PULLUP, pressed = LOW |
-| `NO_GAME_HYPE_INTERVAL_MS` | `120UL * 1000UL` | No-game hype animation cycle |
-| `UPDATE_CHECK_INTERVAL_MS` | `60 * 60 * 1000UL` | OTA hourly check |
+| `src/main.cpp` | All firmware logic (WiFi, ESPN, countdown, OTA, `setup()`, `loop()`) | Yes |
+| `include/animations.h` | LCD custom characters and hype/celebration animations | Yes |
+| `include/phrases.h` | Dickie V quote strings (`dickieV::pick(...)`) | Yes |
+| `platformio.ini` | Board and library settings | Only if the task needs it |
+| `scripts/pre_build.py` | Adds WiFi credentials at build time | Rarely |
+| `.github/workflows/buildversion.yml` | CI: builds and publishes a GitHub Release on push to `main` | Rarely |
+| `check_espn.py` | Desktop script to inspect ESPN API responses (`python check_espn.py`) | Optional |
+| `.agent/` | Agent docs and helper scripts. The firmware build never uses these files. | Only if asked |
+| `.pio/` | Build output. Ignored by git. | Never |
 
-### Key functions in `src/main.cpp`
-| Function | Line (approx) | Purpose |
+Do not create new `.cpp` files in `src/` unless the task asks for it. All logic lives in `src/main.cpp`.
+
+## 5. Map of `src/main.cpp`
+
+Line numbers are approximate. Search for the name instead of trusting the number.
+
+| Name | ~Line | Purpose |
 |---|---|---|
-| `showOnLcd(l1, l2)` | ~63 | Clears LCD, prints line1/line2 (each truncated to 16 chars) |
-| `parseIsoUtc(iso)` | ~73 | Parses ISO-8601 to `time_t` UTC |
-| `formatPstTime(iso)` | ~89 | `HH:MM PST` from ISO |
-| `formatCountdown(iso)` | ~100 | `T-HH:MM:SS` ticking countdown, `LIVE` if past, `T- --:--` on parse fail |
-| `refreshCountdownDisplay()` | ~305 | Builds `DUKE @ <time>` + `T-HH:MM:SS`, dedupes against last render |
-| `fetchScore()` | ~322 | Polls ESPN, updates `cachedGameStartIso`, shows score or countdown |
-| `loop()` | ~713 | Button debounce, 15s ESPN re-check, 1s countdown tick, hype animations, OTA check |
+| Settings block | 13-66 | `TEAM`, ESPN `HOST`/`PATH`, timing intervals, `FIRMWARE_VERSION`, `BUTTON_PIN`, `WIFI_DEBUG_LCD`, GitHub owner/repo, `lcd` pins |
+| `showOnLcd(l1, l2)` | 81 | Clears the LCD and prints two lines. Each line is cut to 16 chars. |
+| `parseIsoUtc` / `formatCountdown` | 93 / 109 | ISO time to `time_t`; builds `T-HH:MM:SS` (`LIVE` once start time passes) |
+| `readBootCache` / `writeBootCache` | 162 / 169 | Saves today's game to EEPROM so a reboot can show it without a network call |
+| `loadWifiNetworks` | 195 | Reads WiFi networks baked in at build time |
+| `beginWifiConnect` / `pollWifiConnect` | 333 / 367 | Non-blocking WiFi connect that tries each network in turn |
+| `refreshCountdownDisplay` / `tickCountdown` | 402 / 425 | Redraws the countdown only when the text changes (no flicker) |
+| `fetchScore()` | 454 | Calls ESPN, shows score or countdown, updates `cachedGameStartIso` |
+| `scanDukeGamesForDate` | 513 | Downloads and parses one day of ESPN games |
+| `findNextDukeGame` | 639 | Looks up to 14 days ahead for the next game |
+| `checkForUpdate()` | 725 | OTA: checks the latest GitHub release and flashes it if newer |
+| `setup()` | 793 | LCD init, boot animations, WiFi, NTP time, first fetch |
+| `loop()` | 886 | Button (D4) = check for update; ESPN refresh; countdown tick; hype animations; hourly OTA check |
 
-### Runtime behavior (under the hood vs. on screen)
-- **Under the hood:** `fetchScore()` runs every `GAME_START_CHECK_INTERVAL_MS` (15s) over WiFi to verify/correct the true game start time and update `cachedGameStartIso`.
-- **On screen:** `loop()` ticks `refreshCountdownDisplay()` every `COUNTDOWN_TICK_MS` (1s) off `cachedGameStartIso` + `time(nullptr)`. The clock runs continuously between ESPN re-checks; it does **not** wait for the 15s check to update the display.
-- Countdown format: always `T-HH:MM:SS`. Never `"in X days"` (that static behavior was removed).
+### Key settings (top of `src/main.cpp`)
 
-### Hardware pins (hd44780_pinIO)
-`lcd(D1, D2, D5, D6, D7, D0)` — RS=D1, RW=D2, E=D5, D4=D6, D5=D7, D6=D0. LCD is 16×2.
-
----
-
-## AGGRESSIVELY ENFORCED RULES (violations = redo the work)
-
-### Rule 1: `&&` is NOT a shell separator in PowerShell
-
-### Rule 1: `&&` is NOT a shell separator in PowerShell
-PowerShell treats `&&` as a variable-name continuation, not a command separator. **Always use `;`** between commands. Never write `cd ... && pio run`. A command like:
-
-
-
-
-
-### Rule 2: `-C` is NOT a PlatformIO option
-`pio.exe` does **not** accept `-C`. Use `--project-dir` or `cd` first:
-pio run --project-dir c:\Users\jmann\Documents\DickieV\DickieV
-
-
-### Rule 3: No Unix utilities in PowerShell
-No `head`, `tail`, `ls -la`, `grep`. Use `Get-Content -TotalCount` / `-Tail`, `dir` / `Get-ChildItem -Force`, `Select-String`.
-
-### Rule 4: Build verification is mandatory
-After **every** edit to `src/`:
-1. `pio run --project-dir .`
-2. Confirm **zero warnings and zero errors** in output.
-3. If `Wunused-function`, `format-truncation`, or any new warning appears, fix it before finishing.
-
-### Rule 5: `.agent/` is never compiled
-Never add `.agent/` to `src/`, `include/`, or any build path. Never reference `.agent/` paths in firmware code or OTA artifacts.
-
-### Rule 6: Commit discipline
-Only source changes in `src/` (and intentionally `include/`) belong in commits. Never commit `.pio/`, build logs, or `.agent/` working files.
-
-### Rule 7: PowerShell quoting
-Avoid nested quotes in `-c` Python arguments; write a `.py` file and run it. Avoid `||` chains in PowerShell; use `;`.
-
-
----
-
-## BUILD VERIFICATION WORKFLOW (copy-paste this)
-
-```powershell
-cd c:\Users\jmann\Documents\DickieV\DickieV
-pio run --project-dir .
-```
-
-Expected success marker: `======================== [SUCCESS]` with no `warning:` lines from `src/main.cpp`.
-
-If you see `[-Wunused-function]` or similar, remove the unused function — do not leave warnings.
-
----
-
-## SESSION HANDOFF TEMPLATE
-When ending a session, leave a note for the next agent (append to `.agent/SESSION_NOTES.md` or this file):
-
-```
-## Session Handoff — <date>
-### What was done:
-- <change 1>
-- <change 2>
-### Files modified:
-- src/main.cpp (lines X–Y)
-### Build status:
-- [SUCCESS] / [FAILED] — pio run output notes
-### Next steps / TODOs:
-- <todo 1>
-- <todo 2>
-### Known open issues:
-- <issue>
-```
-
-Do not start a new session without reading the most recent handoff note first.
-
----
-
-## FILES THAT MUST NOT BE COMPILED
-| Path | Purpose | Compiled? |
+| Constant | Current value | Meaning |
 |---|---|---|
-| `src/main.cpp` | Firmware entry | ✅ Yes |
-| `src/*.h` | Firmware headers | ✅ Yes |
-| `.agent/` | Agent instructions | ❌ Never |
-| `lib/`, `include/` | Libraries | ✅ Yes (headers only) |
-| `.pio/`, `.vscode/` | Build config | ❌ Never |
+| `TEAM` | `"DUKE"` | ESPN team abbreviation to follow |
+| `GAME_START_CHECK_INTERVAL_MS` | `30UL * 1000UL` (30 s) | How often ESPN is queried |
+| `COUNTDOWN_TICK_MS` | `200UL` | How often the countdown text is checked. The LCD changes once per second. |
+| `NO_GAME_HYPE_INTERVAL_MS` | `120UL * 1000UL` | Hype animation cycle when there is no game |
+| `UPDATE_CHECK_INTERVAL_MS` | `60UL * 60UL * 1000UL` | OTA check, once an hour |
+| `WIFI_DEBUG_LCD` | `0` | Set to `1` to show WiFi debug info on the LCD. Set it back to `0` before committing. |
+| `BUTTON_PIN` | `D4` | Button to GND, `INPUT_PULLUP`, LOW = pressed |
 
+If you change a value here, update this table too.
 
+## 6. Hardware and runtime facts
 
+- LCD: 16 columns x 2 rows, `hd44780_pinIO lcd(D1, D2, D5, D6, D7, D0)`. **Any text longer than 16 chars is cut off.** Check string lengths.
+- The ESP8266 has very little RAM (~40 KB free). Avoid large `String` concatenations, big buffers, and large `JsonDocument`s. Use ArduinoJson filters, as the existing code does.
+- Never block `loop()` for a long time. Use `millis()` timers like the existing code. Do not add long `delay()` calls.
+- Times from ESPN are UTC. They are shown in Pacific time (see `makePstDateKeyFromUtc`).
+- Libraries: ArduinoJson **v7** (use `JsonDocument`, not `StaticJsonDocument`/`DynamicJsonDocument`), hd44780.
 
+## 7. Versions and releases (do not do this by hand)
 
+- On every push to `main`, the GitHub Action `.github/workflows/buildversion.yml`:
+  1. sets `FIRMWARE_VERSION` in `src/main.cpp` to the run number (for example `"24"`)
+  2. builds the firmware
+  3. creates the GitHub release `v24` with `firmware.bin` attached
+- Devices compare the release tag against their own `FIRMWARE_VERSION` and update when the tag is higher.
+- In the repo, `FIRMWARE_VERSION` stays `"0"`. **Do not edit it, and do not create git tags.**
 
-git show c88895e -- include/animations.h \| 
+## 8. WiFi credentials (local builds)
 
+`scripts/pre_build.py` adds WiFi networks to the firmware at build time:
+1. from the `WIFI_SECRETS` environment variable (`SSID|PASSWORD`, one per line, max 8), or
+2. from `include/wifi_credentials.h`. It is ignored by git and is **never** committed. Format: `{"SSID", "PASSWORD"},`
 
-# CORRECT:
-git show c88895e -- include/animations.h \| Select-Object -First 100
+If neither exists, the build still passes and prints `WARNING: WIFI_SECRETS is empty`. That is normal for test builds. The board just won't connect to WiFi.
 
+## 9. Standard workflow
 
-### Rule 9: `pio` / `platformio` CLI IS installed
-The `pio.exe` executable **is** on this machine's PATH at `C:\Users\jmann\.platformio\penv\Scripts`. Running `pio run` or `platformio run` works directly.
+1. `git status` and `git --no-pager log --oneline -5` to see the current state.
+2. Read the parts of `src/main.cpp` you need. Use section 5 to find them.
+3. Make the change.
+4. `powershell -ExecutionPolicy Bypass -File .agent\build.ps1` and repeat until `BUILD PASSED`.
+5. `git --no-pager diff` and check that only the intended lines changed.
+6. Commit only if the user asks you to.
 
-You may run `pio` or `platformio` directly (e.g. `pio run --project-dir .`). Prefer `--project-dir` over `-C` (see Rule 2) and use `;` as the shell separator in PowerShell (see Rule 1).
+## 10. Helper scripts in `.agent/`
 
-### Rule 10: `cd ... && ...` chains fail even with single quotes
-Even wrapping paths in single quotes does not make `&&` valid in PowerShell. Always split into separate commands with `;`:
+| Script | Purpose |
+|---|---|
+| `build.ps1` | Builds the firmware and prints `BUILD PASSED` or `BUILD FAILED`. Use `-Clean` for a full rebuild. The full log is in `.pio\agent_build.log`. |
+| `setup_env.ps1` | Checks that PlatformIO and the ESP8266 toolchain are installed. |
+| `instructions.ps1` | Prints this file. |
 
-```powershell
-# WRONG:
-cd 'C:\path' && dir
-
-# CORRECT:
-cd 'C:\path'; dir
-```
-
----
-
-## 2. Reusable Setup Helper
-
-`setup_env.ps1` — installs/verifies the PlatformIO and ESP8266 toolchain for this repo.
-
-```powershell
-# setup_env.ps1 — Run once per machine.
-# Reads environment state; no side effects unless explicitly invoked.
-param(
-    [string]$PythonExe = "c:\Users\jmann\.platformio\penv\Scripts\python.exe",
-    [string]$PioExe    = "c:\Users\jmann\.platformio\penv\Scripts\pio.exe"
-)
-
-Write-Host "=== DickieV Agent Setup ==="
-
-# Verify PlatformIO executable
-if (Test-Path $PioExe) {
-    $ver = & $PioExe --version 2>$null
-    Write-Host "PlatformIO: $($ver)"
-} else {
-    Write-Host "MISSING: $PioExe"
-}
-
-# Verify ESP8266 toolchain (xtensa-lx106-elf-gcc)
-$toolchain = "c:\Users\jmann\.platformio\packages\toolchain-xtensa\bin\xtensa-lx106-elf-gcc.exe"
-if (Test-Path $toolchain) {
-    Write-Host "Toolchain: $toolchain"
-} else {
-    Write-Host "MISSING: $toolchain"
-}
-
-# Verify PlatformIO Python environment
-if (Test-Path $PythonExe) {
-    Write-Host "Python: $PythonExe"
-} else {
-    Write-Host "MISSING: $PythonExe"
-}
-
-Write-Host "Setup complete."
-```
-
----
-
-## 3. Build Verification Workflow
-
-When making a change to `src/`:
-
-1. **Clean:** `pio run -t clean --project-dir .`
-2. **Build:** `pio run --project-dir .` (or `-v` for verbose)
-3. **Check for warnings** — specifically:
-   - `format-truncation`
-   - `Wunused-function`
-   - any new error in `src/main.cpp`
-4. **Confirm no new files** are added to `src/`, `include/`, `lib/`, or `test/`.
-5. **Review the git diff** before committing — only source changes in `src/` should be committed to the build artifact.
-
----
-
-## 4. Files That Must NOT Be Compiled
-
-| Path | Purpose | Compiled? |
-|------|---------|-----------|
-| `src/main.cpp` | Firmware entry | ✅ Yes |
-| `src/*.h` | Firmware headers | ✅ Yes (via includes) |
-| `.agent/` | Agent instructions | ❌ Never |
-| `lib/`, `include/` | Libraries | ✅ Yes (library headers) |
-| `.pio/`, `.vscode/` | Build config | ❌ Never |
-
----
-
-## 5. OTA Update Pipeline Safety
-
-When working on `checkForUpdate()` or any OTA-related code:
-
-- **Never** create a firmware binary that contains files from `.agent/`.
-- The OTA update loads only `src/main.cpp` and its dependencies.
-- If adding agent tooling, put it in `.agent/` or root-level scripts that are excluded from `src/`.
-- Always verify the build artifact (`.pio/build/esp12e/*.elf`) does not reference `.agent/` paths.
-
----
-
-## 6. Version Bumping Rules
-
-### 6.1. Version Format
-
-`FIRMWARE_VERSION` in `src/main.cpp` follows semantic versioning: `MAJOR.MINOR.PATCH` (e.g. `1.0.0`).
-
-The LCD splash displays versions as `vMAJOR.MINOR.PATCH` (the firmware release tag from GitHub).
-
-### 6.2. Bumping the Version
-
-The agent decides which component to bump:
-
-| Bump type | When to use | Effect |
-|-----------|-------------|--------|
-| `major`   | Breaking changes, new hardware, incompatible API | `1.0.0` → `2.0.0` |
-| `minor`   | New features, backward-compatible changes | `1.0.0` → `1.1.0` |
-| `patch`   | Bug fixes, small tweaks | `1.0.0` → `1.0.1` |
-
-Use `.agent/bump_version.py`:
-
-```powershell
-python .agent/bump_version.py patch   # 1.0.0 → 1.0.1
-python .agent/bump_version.py minor   # 1.0.0 → 1.1.0
-python .agent/bump_version.py major   # 1.0.0 → 2.0.0
-python .agent/bump_version.py --new 1.2.3  # explicit version
-```
-
-### 6.3. After Bumping
-
-1. Commit the `src/main.cpp` change.
-2. Create a git tag: `git tag v<major>.<minor>.<patch>` (e.g. `git tag v1.0.1`).
-3. Push tag: `git push origin v1.0.1`.
-4. Rebuild firmware: `pio run --project-dir .`.
-5. The GitHub Actions workflow (`buildversion.yml`) will also sync `FIRMWARE_VERSION` to `github.run_number` on CI builds.
-
-### 6.4. LCD Version Display
-
-The version splash now shows: `v<major>.<minor>.<patch>`
-
-Example: `v1.0.0`
-
-The version comes from `FIRMWARE_VERSION` in `src/main.cpp`, which is synced to the GitHub
-release tag on CI builds. No build/commit number is displayed.
+Uploading to the board (`pio run -t upload`) needs the board connected over USB. Do it only when the user asks.

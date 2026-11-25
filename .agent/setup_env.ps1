@@ -1,34 +1,29 @@
-# setup_env.ps1 — Run once per machine.
-# Verifies PlatformIO and the ESP8266 toolchain for the DickieV repo.
-# No side effects unless explicitly invoked (only reads paths).
-param(
-    [string]$PythonExe = "c:\Users\jmann\.platformio\penv\Scripts\python.exe",
-    [string]$PioExe    = "c:\Users\jmann\.platformio\penv\Scripts\pio.exe"
-)
+# setup_env.ps1 - Check that the PlatformIO toolchain is installed. Read-only.
+# Works on any user account (uses $env:USERPROFILE, no hard-coded usernames).
+#
+# Usage:
+#   powershell -ExecutionPolicy Bypass -File .agent\setup_env.ps1
 
-Write-Host "=== DickieV Agent Setup ==="
-
-# Verify PlatformIO executable
-if (Test-Path $PioExe) {
-    $ver = & $PioExe --version 2>$null
-    Write-Host "PlatformIO: $($ver)"
-} else {
-    Write-Host "MISSING: $PioExe"
+$pioHome = Join-Path $env:USERPROFILE '.platformio'
+$checks = [ordered]@{
+    'pio.exe'   = Join-Path $pioHome 'penv\Scripts\pio.exe'
+    'Toolchain' = Join-Path $pioHome 'packages\toolchain-xtensa\bin\xtensa-lx106-elf-gcc.exe'
 }
 
-# Verify ESP8266 toolchain (xtensa-lx106-elf-gcc)
-$toolchain = "c:\Users\jmann\.platformio\packages\toolchain-xtensa\bin\xtensa-lx106-elf-gcc.exe"
-if (Test-Path $toolchain) {
-    Write-Host "Toolchain: $toolchain"
-} else {
-    Write-Host "MISSING: $toolchain"
+$ok = $true
+foreach ($name in $checks.Keys) {
+    if (Test-Path $checks[$name]) {
+        Write-Host "OK      $name : $($checks[$name])"
+    } else {
+        Write-Host "MISSING $name : $($checks[$name])"
+        $ok = $false
+    }
 }
 
-# Verify PlatformIO Python environment
-if (Test-Path $PythonExe) {
-    Write-Host "Python: $PythonExe"
+if (Get-Command pio -ErrorAction SilentlyContinue) {
+    Write-Host "OK      pio is on PATH"
 } else {
-    Write-Host "MISSING: $PythonExe"
+    Write-Host "NOTE    pio is not on PATH. Use .agent\build.ps1, which finds it for you."
 }
 
-Write-Host "Setup complete."
+if ($ok) { Write-Host "SETUP OK" } else { Write-Host "SETUP INCOMPLETE (toolchain downloads on first build)" }
