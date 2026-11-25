@@ -3,8 +3,6 @@ name: Build and release firmware
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -19,11 +17,9 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE" 2>/dev/null || true
           rm -rf /tmp/dickievrepo
-          # Fetch by full ref so PR merge refs (refs/pull/N/merge) work too
-          git init -q /tmp/dickievrepo
+          git clone --branch "${{ github.ref_name }}" --single-branch "https://github.com/${{ github.repository }}.git" /tmp/dickievrepo
           cd /tmp/dickievrepo
-          git fetch -q --depth 1 "https://github.com/${{ github.repository }}.git" "${{ github.ref }}"
-          git checkout -q FETCH_HEAD
+          git checkout "${{ github.sha }}"
           rm -rf "$GITHUB_WORKSPACE"/*
           cp -a /tmp/dickievrepo/. "$GITHUB_WORKSPACE/"
           cd "$GITHUB_WORKSPACE"
@@ -47,13 +43,11 @@ jobs:
         run: pio run -e esp12e
 
       - name: Prepare release asset
-        if: github.event_name != 'pull_request'
         run: |
           mkdir -p dist
           cp .pio/build/esp12e/firmware.bin dist/firmware.bin
 
       - name: Create release
-        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
