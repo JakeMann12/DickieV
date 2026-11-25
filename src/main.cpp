@@ -16,6 +16,9 @@ const char* TEAM = "DUKE";
 const unsigned long GAME_START_CHECK_INTERVAL_MS = 15UL * 1000UL;
 const unsigned long COUNTDOWN_TICK_MS = 1000UL;
 
+//Seeed XIAO ESP32‑C5	Likely under $10	Small and cheap. I haven't confirmed the current price.////
+//BW16 (Realtek RTL8720DN)	About $5–8 on AliExpress (from memory, not checked)	Cheapest, but its Arduino support and documentation are much weaker. OTA and HTTPS would take more work.
+
 // Firmware release number (GitHub release tag / run number — e.g. "24").
 const char* FIRMWARE_VERSION = "0";
 
@@ -23,9 +26,9 @@ const char* FIRMWARE_VERSION = "0";
 // HIGH when open and LOW when the button is pressed.
 const uint8_t BUTTON_PIN = D4;
 
-// TEMPORARY WiFi debugging: skip boot animations and show each SSID/password
-// attempt plus the failure reason on the LCD. Set to 0 to restore normal boot.
-#define WIFI_DEBUG_LCD 1
+// WiFi debugging: set to 1 to skip boot animations, scan and list visible
+// networks, and show each SSID/password attempt plus the failure reason on the LCD.
+#define WIFI_DEBUG_LCD 0
 
 struct BootCache {
   uint32_t magic;
@@ -621,6 +624,9 @@ static bool fetchLatestRelease(String& latestTag, String& assetUrl) {
   if (httpCode != HTTP_CODE_OK) {
     Serial.printf("GitHub API failed: %d\n", httpCode);
     http.end();
+    // 403 = GitHub rate limit (60/hr per IP); negative = network/TLS error.
+    showOnLcd("OTA: GitHub err", String(httpCode) + (httpCode == 403 ? " rate limit" : ""));
+    delay(3000);
     return false;
   }
 
@@ -636,6 +642,8 @@ static bool fetchLatestRelease(String& latestTag, String& assetUrl) {
   http.end();
   if (err) {
     Serial.printf("JSON parse failed: %s\n", err.c_str());
+    showOnLcd("OTA: JSON err", err.c_str());
+    delay(3000);
     return false;
   }
 
@@ -662,6 +670,8 @@ bool checkForUpdate() {
 
   if (latestTag.length() == 0 || assetUrl.length() == 0) {
     Serial.println("No release asset found");
+    showOnLcd("OTA: no release", "asset found");
+    delay(3000);
     return false;
   }
 
