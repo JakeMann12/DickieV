@@ -13,8 +13,10 @@
 const char* HOST = "site.api.espn.com";
 const char* PATH = "/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups=50&limit=400&dates=";
 const char* TEAM = "DUKE";
-const unsigned long GAME_START_CHECK_INTERVAL_MS = 15UL * 1000UL;
-const unsigned long COUNTDOWN_TICK_MS = 1000UL;
+const unsigned long GAME_START_CHECK_INTERVAL_MS = 30UL * 1000UL;
+// How often the countdown text is re-evaluated. The LCD is only rewritten when
+// the displayed text actually changes (i.e. once per second).
+const unsigned long COUNTDOWN_TICK_MS = 200UL;
 
 //Seeed XIAO ESP32‑C5	Likely under $10	Small and cheap. I haven't confirmed the current price.////
 //BW16 (Realtek RTL8720DN)	About $5–8 on AliExpress (from memory, not checked)	Cheapest, but its Arduino support and documentation are much weaker. OTA and HTTPS would take more work.
@@ -35,10 +37,14 @@ struct BootCache {
   char lastDateKey[9];
   char lastConnectedSsid[32];
   char lastGameStartIso[32];
+  char lastOpponent[12];
 };
 
-static const uint32_t BOOT_CACHE_MAGIC = 0x44524456u;
+// Bump when BootCache's layout changes so stale EEPROM data is ignored.
+static const uint32_t BOOT_CACHE_MAGIC = 0x44524457u;
 static String cachedGameStartIso;
+// Opponent label for the cached game, e.g. "vs UNC" (home) or "@ UVA" (away).
+static String cachedOpponent;
 static unsigned long lastGameStartCheckMs = 0;
 static unsigned long lastCountdownRefreshMs = 0;
 static unsigned long lastNoGameHypeMs = 0;
@@ -67,9 +73,16 @@ String safeLcdLine(const String& s) {
   return out;
 }
 
+// Text most recently written by showOnLcd(), so the countdown can rewrite just
+// the second row instead of clearing (and flickering) the whole display.
+static String g_lcdLine1;
+static String g_lcdLine2;
+
 void showOnLcd(const String& l1, const String& l2) {
   Serial.println(l1);
   Serial.println(l2);
+  g_lcdLine1 = l1;
+  g_lcdLine2 = l2;
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print(safeLcdLine(l1));
@@ -91,17 +104,6 @@ static time_t parseIsoUtc(const String& iso) {
   long days = era * 146097L + (long)doe - 719468L;
 
   return (time_t)(days * 86400L + h * 3600L + mi * 60L + s);
-}
-
-static String formatPstTime(const String& iso) {
-  time_t startUtc = parseIsoUtc(iso);
-  if (startUtc == 0) return "TBD";
-
-  time_t pstEpoch = startUtc - (8 * 3600L);
-  struct tm* pst = gmtime(&pstEpoch);
-  char buf[16];
-  snprintf(buf, sizeof(buf), "%02d:%02d PST", pst->tm_hour, pst->tm_min);
-  return String(buf);
 }
 
 static String formatCountdown(const String& iso) {
@@ -127,8 +129,12 @@ static long secondsUntil(const String& iso) {
 }
 
 static String makePstDateString();
-static String scanDukeGamesForDate(const String& dateKey, String& scoreLine1, String& scoreDetail, bool& foundLiveOrFinal);
-static String findNextDukeGame();
+static String scanDukeGamesForDate(const String& dateKey, String& scoreLine1, String& scoreDetail, bool& foundLiveOrFinal, String& opponent);
+static String findNextDukeGame(String& opponent);
+
+static String matchupLine(const String& opponent) {
+  return opponent.length() > 0 ? "DUKE " + opponent : String("DUKE game");
+}
 
 static String makePstDateKeyFromUtc(time_t utcEpoch) {
   time_t pstEpoch = utcEpoch - (8 * 3600L);
@@ -166,6 +172,9 @@ static void writeBootCache(const String& dateKey, const String& ssid, const Stri
   strlcpy(bootCache.lastDateKey, dateKey.c_str(), sizeof(bootCache.lastDateKey));
   strlcpy(bootCache.lastConnectedSsid, ssid.c_str(), sizeof(bootCache.lastConnectedSsid));
   strlcpy(bootCache.lastGameStartIso, gameStartIso.c_str(), sizeof(bootCache.lastGameStartIso));
+  if (gameStartIso.length() > 0) {
+    strlcpy(bootCache.lastOpponent, cachedOpponent.c_str(), sizeof(bootCache.lastOpponent));
+  }
   EEPROM.begin(sizeof(BootCache));
   EEPROM.put(0, bootCache);
   EEPROM.commit();
@@ -393,39 +402,74 @@ static bool pollWifiConnect() {
 static void refreshCountdownDisplay() {
   if (cachedGameStartIso.length() == 0) return;
 
-  String line1 = "DUKE @ " + formatPstTime(cachedGameStartIso);
+  String line1 = matchupLine(cachedOpponent);
   String line2 = formatCountdown(cachedGameStartIso);
 
-  // The countdown ticks every second, so only rewrite the LCD when the text
-  // actually changes (e.g. the game start time was updated under the hood).
-  static String lastLine1;
-  static String lastLine2;
-  if (line1 == lastLine1 && line2 == lastLine2) return;
-  lastLine1 = line1;
-  lastLine2 = line2;
+  if (line1 != g_lcdLine1) {
+    showOnLcd(line1, line2);
+    return;
+  }
+  if (line2 == g_lcdLine2) return;
 
-  showOnLcd(line1, line2);
+  // Only the countdown changed: overwrite row 2 in place (padded to clear any
+  // leftover characters) so the display ticks without flicker.
+  g_lcdLine2 = line2;
+  String padded = safeLcdLine(line2);
+  while (padded.length() < 16) padded += ' ';
+  lcd.setCursor(0, 1);
+  lcd.print(padded);
 }
+
+// Keeps the countdown ticking locally from the last known game start time.
+// Called from loop() and while a slow ESPN download is being parsed.
+static void tickCountdown() {
+  if (cachedGameStartIso.length() == 0) return;
+  unsigned long nowMs = millis();
+  if (nowMs - lastCountdownRefreshMs < COUNTDOWN_TICK_MS) return;
+  lastCountdownRefreshMs = nowMs;
+  refreshCountdownDisplay();
+}
+
+// Stream wrapper that keeps the countdown ticking while ArduinoJson reads a
+// large HTTPS response, which can otherwise block loop() for many seconds.
+class CountdownTickingStream : public Stream {
+ public:
+  explicit CountdownTickingStream(Stream& inner) : inner_(inner) {}
+  int available() override { return inner_.available(); }
+  int read() override {
+    tickCountdown();
+    return inner_.read();
+  }
+  int peek() override { return inner_.peek(); }
+  size_t readBytes(char* buffer, size_t length) override {
+    tickCountdown();
+    return inner_.readBytes(buffer, length);
+  }
+  size_t write(uint8_t) override { return 0; }
+
+ private:
+  Stream& inner_;
+};
 
 void fetchScore() {
   String todayKey = makePstDateString();
   String scoreLine1, scoreDetail;
   bool foundLiveOrFinal = false;
-  String upcomingIso = scanDukeGamesForDate(todayKey, scoreLine1, scoreDetail, foundLiveOrFinal);
+  String upcomingOpponent;
+  String upcomingIso = scanDukeGamesForDate(todayKey, scoreLine1, scoreDetail, foundLiveOrFinal, upcomingOpponent);
 
   Serial.printf("requestDate=%s\n", todayKey.c_str());
 
   // An upcoming Duke game today takes priority over any cached future game.
   if (upcomingIso.length() > 0) {
     cachedGameStartIso = upcomingIso;
+    cachedOpponent = upcomingOpponent;
     writeBootCache(todayKey, WiFi.SSID(), cachedGameStartIso);
     long secs = secondsUntil(upcomingIso);
     if (secs > 0 && secs <= 120) {
       preGameHype(lcd);
     }
-    String line1 = "DUKE @ " + formatPstTime(upcomingIso);
-    String line2 = formatCountdown(upcomingIso);
-    showOnLcd(line1, line2);
+    showOnLcd(matchupLine(cachedOpponent), formatCountdown(upcomingIso));
     return;
   }
 
@@ -450,9 +494,11 @@ void fetchScore() {
   }
 
   // Look ahead for the next Duke game (only when nothing is cached yet).
-  String nextIso = findNextDukeGame();
+  String nextOpponent;
+  String nextIso = findNextDukeGame(nextOpponent);
   if (nextIso.length() > 0) {
     cachedGameStartIso = nextIso;
+    cachedOpponent = nextOpponent;
     writeBootCache(todayKey, WiFi.SSID(), cachedGameStartIso);
     refreshCountdownDisplay();
     return;
@@ -467,7 +513,8 @@ void fetchScore() {
 static String scanDukeGamesForDate(const String& dateKey,
                                    String& scoreLine1,
                                    String& scoreDetail,
-                                   bool& foundLiveOrFinal) {
+                                   bool& foundLiveOrFinal,
+                                   String& opponent) {
   WiFiClientSecure client;
   client.setInsecure();
   client.setBufferSizes(1024, 512);
@@ -475,6 +522,7 @@ static String scanDukeGamesForDate(const String& dateKey,
   scoreLine1 = "";
   scoreDetail = "";
   foundLiveOrFinal = false;
+  opponent = "";
 
   if (!client.connect(HOST, 443)) {
     Serial.println("Connect fail (scan)");
@@ -495,18 +543,22 @@ static String scanDukeGamesForDate(const String& dateKey,
   f["status"]["type"]["state"] = true;
   f["status"]["type"]["shortDetail"] = true;
   f["competitions"][0]["startDate"] = true;
+  f["competitions"][0]["neutralSite"] = true;
   JsonArray comps = f["competitions"][0]["competitors"].to<JsonArray>();
   JsonObject comp0 = comps.add<JsonObject>();
   comp0["score"] = true;
+  comp0["homeAway"] = true;
   comp0["team"]["abbreviation"] = true;
   JsonObject comp1 = comps.add<JsonObject>();
   comp1["score"] = true;
+  comp1["homeAway"] = true;
   comp1["team"]["abbreviation"] = true;
 
   JsonDocument doc;
+  CountdownTickingStream tickingClient(client);
   DeserializationError err = deserializeJson(
     doc,
-    client,
+    tickingClient,
     DeserializationOption::Filter(filter),
     DeserializationOption::NestingLimit(32));
   client.stop();
@@ -538,6 +590,22 @@ static String scanDukeGamesForDate(const String& dateKey,
     if (status == "pre" || status == "scheduled") {
       if (upcomingIso.length() == 0) {
         upcomingIso = gameStart;
+        // Short ESPN abbreviation (e.g. "UNC"), capped so "DUKE vs XXXXXX"
+        // always fits on one 16-char LCD row.
+        bool dukeAway = false;
+        String oppAbbr = "";
+        for (JsonObject c : evComps) {
+          String abbr = c["team"]["abbreviation"] | "";
+          if (abbr == TEAM) {
+            dukeAway = String(c["homeAway"] | "") == "away";
+          } else {
+            oppAbbr = abbr;
+          }
+        }
+        bool neutral = ev["competitions"][0]["neutralSite"] | false;
+        if (oppAbbr.length() > 0) {
+          opponent = String(dukeAway && !neutral ? "@ " : "vs ") + oppAbbr.substring(0, 6);
+        }
       }
       continue;
     }
@@ -568,12 +636,12 @@ static String makePstDateKeyPlusDays(int daysOffset) {
   return makePstDateKeyFromUtc(target);
 }
 
-static String findNextDukeGame() {
+static String findNextDukeGame(String& opponent) {
   for (int offset = 1; offset <= MAX_LOOKAHEAD_DAYS; ++offset) {
     String dateKey = makePstDateKeyPlusDays(offset);
     String scoreLine1, scoreDetail;
     bool foundLiveOrFinal = false;
-    String upcomingIso = scanDukeGamesForDate(dateKey, scoreLine1, scoreDetail, foundLiveOrFinal);
+    String upcomingIso = scanDukeGamesForDate(dateKey, scoreLine1, scoreDetail, foundLiveOrFinal, opponent);
     if (upcomingIso.length() > 0) {
       return upcomingIso;
     }
@@ -808,6 +876,7 @@ void setup() {
   if (bootCache.lastDateKey[0] != '\0' && String(bootCache.lastDateKey) == todayKey &&
       bootCache.lastGameStartIso[0] != '\0') {
     cachedGameStartIso = String(bootCache.lastGameStartIso);
+    cachedOpponent = String(bootCache.lastOpponent);
     refreshCountdownDisplay();
   } else {
     fetchScore();
@@ -842,11 +911,7 @@ void loop() {
       fetchScore();
     }
 
-    if (cachedGameStartIso.length() > 0 &&
-        nowMs - lastCountdownRefreshMs >= COUNTDOWN_TICK_MS) {
-      lastCountdownRefreshMs = nowMs;
-      refreshCountdownDisplay();
-    }
+    tickCountdown();
 
     // When there's no Duke game today, cycle through all three hype
     // animations (DUKE -> DDMF -> GTHC) every 120 seconds, then restore
