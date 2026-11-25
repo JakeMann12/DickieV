@@ -23,6 +23,10 @@ const char* FIRMWARE_VERSION = "0";
 // HIGH when open and LOW when the button is pressed.
 const uint8_t BUTTON_PIN = D4;
 
+// TEMPORARY WiFi debugging: skip boot animations and show each SSID/password
+// attempt plus the failure reason on the LCD. Set to 0 to restore normal boot.
+#define WIFI_DEBUG_LCD 1
+
 struct BootCache {
   uint32_t magic;
   char lastDateKey[9];
@@ -211,10 +215,35 @@ static unsigned long g_wifiStartMs = 0;
 static bool g_wifiActive = false;
 static bool g_wifiExhausted = false;
 
+static const unsigned long WIFI_ATTEMPT_TIMEOUT_MS = 10000UL;
+
+static const char* wifiStatusText(wl_status_t status) {
+  switch (status) {
+    case WL_IDLE_STATUS:     return "idle/no reply";
+    case WL_NO_SSID_AVAIL:   return "SSID not found";
+    case WL_CONNECT_FAILED:  return "connect failed";
+    case WL_WRONG_PASSWORD:  return "wrong password";
+    case WL_CONNECTION_LOST: return "conn lost";
+    case WL_DISCONNECTED:    return "disconnected";
+    case WL_CONNECTED:       return "connected";
+    default:                 return "unknown";
+  }
+}
+
 static void attemptWifiNetwork(size_t idx) {
   const WifiNetwork& network = wifiNetworks[g_wifiOrder[idx]];
   Serial.print("Trying: ");
   Serial.println(network.ssid);
+#if WIFI_DEBUG_LCD
+  showOnLcd(String(idx + 1) + "/" + String(g_wifiOrderCount) + " " + network.ssid,
+            network.password);
+  delay(2500);
+  // Show the full SSID/password if they don't fit on the 16-char lines.
+  if (network.ssid.length() > 12 || network.password.length() > 16) {
+    showOnLcd(network.ssid.substring(12), network.password.substring(16));
+    delay(2500);
+  }
+#endif
   WiFi.disconnect();
   WiFi.mode(WIFI_STA);
   WiFi.begin(network.ssid, network.password);
@@ -269,7 +298,16 @@ static bool pollWifiConnect() {
     return true;
   }
 
-  if (millis() - g_wifiStartMs >= 10000UL) {
+  if (millis() - g_wifiStartMs >= WIFI_ATTEMPT_TIMEOUT_MS) {
+    wl_status_t status = WiFi.status();
+    const WifiNetwork& failed = wifiNetworks[g_wifiOrder[g_wifiIndex]];
+    Serial.printf("Failed: %s (status %d: %s)\n", failed.ssid.c_str(),
+                  static_cast<int>(status), wifiStatusText(status));
+#if WIFI_DEBUG_LCD
+    showOnLcd("FAIL " + failed.ssid,
+              String(static_cast<int>(status)) + " " + wifiStatusText(status));
+    delay(4000);
+#endif
     if (++g_wifiIndex >= g_wifiOrderCount) {
       g_wifiActive = false;
       g_wifiExhausted = true;
@@ -621,12 +659,23 @@ void setup() {
   readBootCache();
   loadWifiNetworks();
 
+#if !WIFI_DEBUG_LCD
   flashDunkAnimation(lcd);
   flashThreeAnimation(lcd);
+#endif
 
   // Brief version splash so you can see which firmware is running.
   showOnLcd("DickieV", "v" + String(FIRMWARE_VERSION));
   delay(1000);
+
+#if WIFI_DEBUG_LCD
+  if (wifiNetworkCount == 0) {
+    showOnLcd("ERR: no WiFi", "creds in build");
+    return;
+  }
+  showOnLcd(String(wifiNetworkCount) + " networks", "in build");
+  delay(2000);
+#endif
 
   // Kick off the WiFi connection attempt in the background. The startup hype
   // animation keeps running on the LCD while pollWifiConnect() drives the
@@ -634,16 +683,29 @@ void setup() {
   beginWifiConnect();
   bool connected = false;
   if (g_wifiActive) {
+#if WIFI_DEBUG_LCD
+    // No overall deadline: every configured network gets a full attempt.
+    while (!connected && !g_wifiExhausted) {
+      delay(100);
+      connected = pollWifiConnect();
+    }
+#else
     unsigned long connectDeadline = millis() + 40000UL;
     while (!connected && !g_wifiExhausted && millis() < connectDeadline) {
       preGameHype(lcd);          // startup animation keeps displaying
       connected = pollWifiConnect();  // non-blocking; WiFi connects under the hood
     }
+#endif
   }
 
   if (connected) {
+#if WIFI_DEBUG_LCD
+    showOnLcd("OK " + WiFi.SSID(), WiFi.localIP().toString());
+    delay(4000);
+#else
     showOnLcd("WiFi connected", WiFi.localIP().toString());
     delay(1000);
+#endif
   }
 
   if (!connected) {
@@ -656,6 +718,12 @@ void setup() {
   while (time(nullptr) < 1700000000 && millis() - ntpStart < 20000) {
     delay(250);
   }
+#if WIFI_DEBUG_LCD
+  if (time(nullptr) < 1700000000) {
+    showOnLcd("ERR: NTP time", "sync failed");
+    delay(4000);
+  }
+#endif
 
   String todayKey = makePstDateString();
   if (bootCache.lastDateKey[0] != '\0' && String(bootCache.lastDateKey) == todayKey &&
