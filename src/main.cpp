@@ -230,6 +230,74 @@ static const char* wifiStatusText(wl_status_t status) {
   }
 }
 
+#if WIFI_DEBUG_LCD
+// Non-ASCII bytes (e.g. the curly apostrophe in "Jake’s iPhone") render as '~'
+// so they're visible on the LCD.
+static String lcdVisible(const String& s) {
+  String out;
+  for (size_t i = 0; i < s.length(); ++i) {
+    char c = s[i];
+    out += (c >= 32 && c < 127) ? c : '~';
+  }
+  return out;
+}
+
+// Scan and show every visible network, then check each configured SSID
+// against the scan results.
+static void debugScanWifi() {
+  showOnLcd("Scanning WiFi...", "");
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+  int n = WiFi.scanNetworks(false, true);  // include hidden networks
+  if (n < 0) {
+    showOnLcd("ERR: scan failed", String(n));
+    delay(4000);
+    return;
+  }
+  showOnLcd("Found " + String(n), "networks (2.4G)");
+  delay(2500);
+
+  for (int i = 0; i < n; ++i) {
+    String ssid = WiFi.SSID(i);
+    String name = ssid.length() ? lcdVisible(ssid) : String("<hidden>");
+    showOnLcd(String(i + 1) + ":" + name,
+              "ch" + String(WiFi.channel(i)) + " " + String(WiFi.RSSI(i)) + "dB L" +
+                  String(ssid.length()));
+    delay(2500);
+    if (name.length() + String(i + 1).length() + 1 > 16) {
+      showOnLcd(name.substring(16 - String(i + 1).length() - 1), "");
+      delay(2000);
+    }
+  }
+
+  for (size_t c = 0; c < wifiNetworkCount; ++c) {
+    const String& want = wifiNetworks[c].ssid;
+    const char* result = "NOT IN SCAN";
+    for (int i = 0; i < n; ++i) {
+      String seen = WiFi.SSID(i);
+      if (seen == want) { result = "MATCH"; break; }
+      String a = seen, b = want;
+      a.trim(); b.trim();
+      if (a.equalsIgnoreCase(b)) {
+        result = "case/space diff";
+      } else if (lcdVisible(a).equalsIgnoreCase(lcdVisible(b)) ||
+                 a.length() != lcdVisible(a).length()) {
+        // Same once special chars are masked, or the scanned name has
+        // non-ASCII chars the secret may have typed differently.
+        if (lcdVisible(a).length() > 0 &&
+            lcdVisible(a).substring(0, 3).equalsIgnoreCase(lcdVisible(b).substring(0, 3))) {
+          result = "special char?";
+        }
+      }
+    }
+    showOnLcd("Cfg:" + lcdVisible(want), String(result) + " L" + String(want.length()));
+    delay(3500);
+  }
+  WiFi.scanDelete();
+}
+#endif
+
 static void attemptWifiNetwork(size_t idx) {
   const WifiNetwork& network = wifiNetworks[g_wifiOrder[idx]];
   Serial.print("Trying: ");
@@ -675,6 +743,7 @@ void setup() {
   }
   showOnLcd(String(wifiNetworkCount) + " networks", "in build");
   delay(2000);
+  debugScanWifi();
 #endif
 
   // Kick off the WiFi connection attempt in the background. The startup hype
