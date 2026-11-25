@@ -49,6 +49,7 @@ The terminal is **PowerShell**, not bash. Common mistakes:
 | `src/main.cpp` | All firmware logic (WiFi, ESPN, countdown, OTA, `setup()`, `loop()`) | Yes |
 | `include/animations.h` | LCD custom characters and hype/celebration animations | Yes |
 | `include/phrases.h` | Dickie V quote strings (`dickieV::pick(...)`) | Yes |
+| `include/wifi_debug.h` | `WIFI_DEBUG_LCD` switch and WiFi debug LCD hooks (`wifiDebug::...`). Hooks are no-ops when the switch is `0`. | Yes |
 | `platformio.ini` | Board and library settings | Only if the task needs it |
 | `scripts/pre_build.py` | Adds WiFi credentials at build time | Rarely |
 | `.github/workflows/buildversion.yml` | CI: builds and publishes a GitHub Release on push to `main` | Rarely |
@@ -64,7 +65,7 @@ Line numbers are approximate. Search for the name instead of trusting the number
 
 | Name | ~Line | Purpose |
 |---|---|---|
-| Settings block | 13-66 | `TEAM`, ESPN `HOST`/`PATH`, timing intervals, `FIRMWARE_VERSION`, `BUTTON_PIN`, `WIFI_DEBUG_LCD`, GitHub owner/repo, `lcd` pins |
+| Settings block | 13-66 | `TEAM`, ESPN `HOST`/`PATH`, timing intervals, `FIRMWARE_VERSION`, `BUTTON_PIN`, GitHub owner/repo, `lcd` pins |
 | `showOnLcd(l1, l2)` | 81 | Clears the LCD and prints two lines. Each line is cut to 16 chars. |
 | `parseIsoUtc` / `formatCountdown` | 93 / 109 | ISO time to `time_t`; builds `T-HH:MM:SS` (`LIVE` once start time passes) |
 | `readBootCache` / `writeBootCache` | 162 / 169 | Saves today's game to EEPROM so a reboot can show it without a network call |
@@ -87,7 +88,7 @@ Line numbers are approximate. Search for the name instead of trusting the number
 | `COUNTDOWN_TICK_MS` | `200UL` | How often the countdown text is checked. The LCD changes once per second. |
 | `NO_GAME_HYPE_INTERVAL_MS` | `120UL * 1000UL` | Hype animation cycle when there is no game |
 | `UPDATE_CHECK_INTERVAL_MS` | `60UL * 60UL * 1000UL` | OTA check, once an hour |
-| `WIFI_DEBUG_LCD` | `0` | Set to `1` to show WiFi debug info on the LCD. Set it back to `0` before committing. |
+| `WIFI_DEBUG_LCD` | `0` | Lives in `include/wifi_debug.h`. Set to `1` (or add `build_flags = -DWIFI_DEBUG_LCD=1`) to show WiFi debug info on the LCD. Set it back to `0` before committing. |
 | `BUTTON_PIN` | `D4` | Button to GND, `INPUT_PULLUP`, LOW = pressed |
 
 If you change a value here, update this table too.

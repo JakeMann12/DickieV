@@ -10,6 +10,7 @@
 #include <time.h>
 #include "phrases.h"
 #include "animations.h"
+#include "wifi_debug.h"
 const char* HOST = "site.api.espn.com";
 const char* PATH = "/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups=50&limit=400&dates=";
 const char* TEAM = "DUKE";
@@ -27,10 +28,6 @@ const char* FIRMWARE_VERSION = "0";
 // Button wired from D4 to GND. Uses the internal pullup so the pin reads
 // HIGH when open and LOW when the button is pressed.
 const uint8_t BUTTON_PIN = D4;
-
-// WiFi debugging: set to 1 to skip boot animations, scan and list visible
-// networks, and show each SSID/password attempt plus the failure reason on the LCD.
-#define WIFI_DEBUG_LCD 0
 
 struct BootCache {
   uint32_t magic;
@@ -53,9 +50,19 @@ static BootCache bootCache = {};
 // How often to cycle the hype animations when there's no Duke game today.
 const unsigned long NO_GAME_HYPE_INTERVAL_MS = 120UL * 1000UL;
 
-// Button debounce state.
-static unsigned long lastButtonCheckMs = 0;
-static bool lastButtonState = HIGH;
+// Button press latch. loop() is often blocked for seconds (ESPN fetch, hype
+// animations), so a falling-edge interrupt records the press until loop() can
+// handle it; otherwise short taps between polls are missed.
+const unsigned long BUTTON_DEBOUNCE_MS = 200UL;
+static volatile bool g_buttonPressed = false;
+static volatile unsigned long g_lastButtonEdgeMs = 0;
+
+IRAM_ATTR void onButtonFalling() {
+  unsigned long nowMs = millis();
+  if (nowMs - g_lastButtonEdgeMs < BUTTON_DEBOUNCE_MS) return;
+  g_lastButtonEdgeMs = nowMs;
+  g_buttonPressed = true;
+}
 
 // OTA update config.
 static unsigned long lastUpdateCheckMs = 0;
@@ -242,88 +249,11 @@ static const char* wifiStatusText(wl_status_t status) {
   }
 }
 
-#if WIFI_DEBUG_LCD
-// Non-ASCII bytes (e.g. the curly apostrophe in "Jake’s iPhone") render as '~'
-// so they're visible on the LCD.
-static String lcdVisible(const String& s) {
-  String out;
-  for (size_t i = 0; i < s.length(); ++i) {
-    char c = s[i];
-    out += (c >= 32 && c < 127) ? c : '~';
-  }
-  return out;
-}
-
-// Scan and show every visible network, then check each configured SSID
-// against the scan results.
-static void debugScanWifi() {
-  showOnLcd("Scanning WiFi...", "");
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
-  delay(100);
-  int n = WiFi.scanNetworks(false, true);  // include hidden networks
-  if (n < 0) {
-    showOnLcd("ERR: scan failed", String(n));
-    delay(4000);
-    return;
-  }
-  showOnLcd("Found " + String(n), "networks (2.4G)");
-  delay(2500);
-
-  for (int i = 0; i < n; ++i) {
-    String ssid = WiFi.SSID(i);
-    String name = ssid.length() ? lcdVisible(ssid) : String("<hidden>");
-    showOnLcd(String(i + 1) + ":" + name,
-              "ch" + String(WiFi.channel(i)) + " " + String(WiFi.RSSI(i)) + "dB L" +
-                  String(ssid.length()));
-    delay(2500);
-    if (name.length() + String(i + 1).length() + 1 > 16) {
-      showOnLcd(name.substring(16 - String(i + 1).length() - 1), "");
-      delay(2000);
-    }
-  }
-
-  for (size_t c = 0; c < wifiNetworkCount; ++c) {
-    const String& want = wifiNetworks[c].ssid;
-    const char* result = "NOT IN SCAN";
-    for (int i = 0; i < n; ++i) {
-      String seen = WiFi.SSID(i);
-      if (seen == want) { result = "MATCH"; break; }
-      String a = seen, b = want;
-      a.trim(); b.trim();
-      if (a.equalsIgnoreCase(b)) {
-        result = "case/space diff";
-      } else if (lcdVisible(a).equalsIgnoreCase(lcdVisible(b)) ||
-                 a.length() != lcdVisible(a).length()) {
-        // Same once special chars are masked, or the scanned name has
-        // non-ASCII chars the secret may have typed differently.
-        if (lcdVisible(a).length() > 0 &&
-            lcdVisible(a).substring(0, 3).equalsIgnoreCase(lcdVisible(b).substring(0, 3))) {
-          result = "special char?";
-        }
-      }
-    }
-    showOnLcd("Cfg:" + lcdVisible(want), String(result) + " L" + String(want.length()));
-    delay(3500);
-  }
-  WiFi.scanDelete();
-}
-#endif
-
 static void attemptWifiNetwork(size_t idx) {
   const WifiNetwork& network = wifiNetworks[g_wifiOrder[idx]];
   Serial.print("Trying: ");
   Serial.println(network.ssid);
-#if WIFI_DEBUG_LCD
-  showOnLcd(String(idx + 1) + "/" + String(g_wifiOrderCount) + " " + network.ssid,
-            network.password);
-  delay(2500);
-  // Show the full SSID/password if they don't fit on the 16-char lines.
-  if (network.ssid.length() > 12 || network.password.length() > 16) {
-    showOnLcd(network.ssid.substring(12), network.password.substring(16));
-    delay(2500);
-  }
-#endif
+  wifiDebug::showAttempt(idx, g_wifiOrderCount, network.ssid, network.password);
   WiFi.disconnect();
   WiFi.mode(WIFI_STA);
   WiFi.begin(network.ssid, network.password);
@@ -383,11 +313,7 @@ static bool pollWifiConnect() {
     const WifiNetwork& failed = wifiNetworks[g_wifiOrder[g_wifiIndex]];
     Serial.printf("Failed: %s (status %d: %s)\n", failed.ssid.c_str(),
                   static_cast<int>(status), wifiStatusText(status));
-#if WIFI_DEBUG_LCD
-    showOnLcd("FAIL " + failed.ssid,
-              String(static_cast<int>(status)) + " " + wifiStatusText(status));
-    delay(4000);
-#endif
+    wifiDebug::showFailure(failed.ssid, status, wifiStatusText(status));
     if (++g_wifiIndex >= g_wifiOrderCount) {
       g_wifiActive = false;
       g_wifiExhausted = true;
@@ -795,6 +721,7 @@ void setup() {
   Serial.printf("DickieV firmware %s\n", FIRMWARE_VERSION);
 
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), onButtonFalling, FALLING);
 
   int status = lcd.begin(16, 2);
   if (status) {
@@ -814,15 +741,9 @@ void setup() {
   showOnLcd("DickieV", "v" + String(FIRMWARE_VERSION));
   delay(1000);
 
-#if WIFI_DEBUG_LCD
-  if (wifiNetworkCount == 0) {
-    showOnLcd("ERR: no WiFi", "creds in build");
+  if (!wifiDebug::bootDiagnostics(wifiNetworks, wifiNetworkCount)) {
     return;
   }
-  showOnLcd(String(wifiNetworkCount) + " networks", "in build");
-  delay(2000);
-  debugScanWifi();
-#endif
 
   // Kick off the WiFi connection attempt in the background. The startup hype
   // animation keeps running on the LCD while pollWifiConnect() drives the
@@ -847,8 +768,7 @@ void setup() {
 
   if (connected) {
 #if WIFI_DEBUG_LCD
-    showOnLcd("OK " + WiFi.SSID(), WiFi.localIP().toString());
-    delay(4000);
+    wifiDebug::showConnected();
 #else
     showOnLcd("WiFi connected", WiFi.localIP().toString());
     delay(1000);
@@ -865,12 +785,7 @@ void setup() {
   while (time(nullptr) < 1700000000 && millis() - ntpStart < 20000) {
     delay(250);
   }
-#if WIFI_DEBUG_LCD
-  if (time(nullptr) < 1700000000) {
-    showOnLcd("ERR: NTP time", "sync failed");
-    delay(4000);
-  }
-#endif
+  wifiDebug::showNtpResult();
 
   String todayKey = makePstDateString();
   if (bootCache.lastDateKey[0] != '\0' && String(bootCache.lastDateKey) == todayKey &&
@@ -886,22 +801,19 @@ void setup() {
 void loop() {
   unsigned long nowMs = millis();
 
-  // Debounced button read on D4 (INPUT_PULLUP, button to GND -> pressed = LOW).
-  if (nowMs - lastButtonCheckMs >= 50UL) {
-    lastButtonCheckMs = nowMs;
-    bool buttonState = digitalRead(BUTTON_PIN);
-    if (buttonState == LOW && lastButtonState == HIGH) {
-      // Button only does something when we're connected to WiFi.
-      if (WiFi.status() == WL_CONNECTED) {
-        showOnLcd("Check update", "now...");
-        delay(600);  // let the user see the button press registered
-        checkForUpdate();
-      } else {
-        showOnLcd("WiFi not", "connected");
-        delay(1200);
-      }
+  // Button on D4 (INPUT_PULLUP, button to GND) latched by onButtonFalling().
+  if (g_buttonPressed) {
+    // Button only does something when we're connected to WiFi.
+    if (WiFi.status() == WL_CONNECTED) {
+      showOnLcd("Check update", "now...");
+      delay(600);  // let the user see the button press registered
+      checkForUpdate();
+    } else {
+      showOnLcd("WiFi not", "connected");
+      delay(1200);
     }
-    lastButtonState = buttonState;
+    // Drop any presses made while the check was running.
+    g_buttonPressed = false;
   }
 
   if (WiFi.status() == WL_CONNECTED) {
