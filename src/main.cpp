@@ -12,14 +12,26 @@
 #include "animations.h"
 #include "wifi_debug.h"
 const char* HOST = "site.api.espn.com";
-const char* PATH = "/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups=50&limit=400&dates=";
-// Full-season Duke schedule (includes today's game). One small request instead
-// of scanning a ~1MB all-D1 scoreboard per day, which often failed on-device.
-const char* SCHEDULE_PATH = "/apis/site/v2/sports/basketball/mens-college-basketball/teams/duke/schedule";
-const char* TEAM = "DUKE";
+const char* LEAGUE_PATH = "/apis/site/v2/sports/basketball/mens-college-basketball";
+
+// The tracked team. espnId is the numeric ESPN team id (the number in the
+// team's espn.com URL); label is what the LCD shows (keep it <= 5 chars).
+struct Team {
+  const char* espnId;
+  const char* label;
+};
+static const Team MY_TEAM = {"150", "DUKE"};
+
 const unsigned long GAME_START_CHECK_INTERVAL_MS = 30UL * 1000UL;
-// How often a cached future game is re-validated against the schedule.
-const unsigned long SCHEDULE_RECHECK_INTERVAL_MS = 60UL * 60UL * 1000UL;
+// Faster polling for crunch time: final 5 minutes of the 2nd half or any
+// overtime, with the margin within 15 points.
+const unsigned long CLOSE_GAME_CHECK_INTERVAL_MS = 10UL * 1000UL;
+const int CLOSE_GAME_CLOCK_SECS = 5 * 60;
+const int CLOSE_GAME_MARGIN = 15;
+// How often an upcoming game is re-validated (catches time changes).
+const unsigned long NEXT_GAME_RECHECK_INTERVAL_MS = 60UL * 60UL * 1000UL;
+// How often to look again when the team has no games left on the schedule.
+const unsigned long NO_GAME_RECHECK_INTERVAL_MS = 6UL * 60UL * 60UL * 1000UL;
 // How often the countdown text is re-evaluated. The LCD is only rewritten when
 // the displayed text actually changes (i.e. once per second).
 const unsigned long COUNTDOWN_TICK_MS = 200UL;
@@ -36,24 +48,37 @@ const uint8_t BUTTON_PIN = D4;
 
 struct BootCache {
   uint32_t magic;
-  char lastDateKey[9];
+  char teamId[8];
   char lastConnectedSsid[32];
-  char lastGameStartIso[32];
-  char lastOpponent[12];
+  char eventId[16];
+  char startIso[24];
+  char opponent[12];
 };
 
 // Bump when BootCache's layout changes so stale EEPROM data is ignored.
-static const uint32_t BOOT_CACHE_MAGIC = 0x44524457u;
-static String cachedGameStartIso;
-// Opponent label for the cached game, e.g. "vs UNC" (home) or "@ UVA" (away).
-static String cachedOpponent;
+static const uint32_t BOOT_CACHE_MAGIC = 0x44524458u;
+
+// The game being tracked: the live/final game today, or else the next one.
+struct Game {
+  String eventId;   // empty = no game known
+  String startIso;  // e.g. "2026-11-26T00:00Z"
+  String state;     // ESPN state: "pre", "in", "post" ("" = unknown yet)
+  String opponent;  // e.g. "vs UNC" (home/neutral) or "@ UVA" (away)
+  String scoreLine; // e.g. "DUKE 45 UNC 39"
+  String detail;    // e.g. "14:44 - 2nd", "Final"
+  int period = 0;   // 1 = 1st half, 2 = 2nd half, 3+ = overtime
+  int clockSecs = -1;
+  int margin = -1;  // absolute point difference (-1 = unknown)
+};
+static Game g_game;
 static unsigned long lastGameStartCheckMs = 0;
-static unsigned long lastScheduleCheckMs = 0;
+// millis() of the last successful next-game lookup (0 = never).
+static unsigned long lastNextGameCheckMs = 0;
 static unsigned long lastCountdownRefreshMs = 0;
 static unsigned long lastNoGameHypeMs = 0;
 static BootCache bootCache = {};
 
-// How often to cycle the hype animations when there's no Duke game today.
+// How often to cycle the hype animations when there's no game to show.
 const unsigned long NO_GAME_HYPE_INTERVAL_MS = 120UL * 1000UL;
 
 // Button press latch. loop() is often blocked for seconds (ESPN fetch, hype
@@ -125,7 +150,7 @@ static String formatCountdown(const String& iso) {
 
   time_t nowUtc = time(nullptr);
   long diff = startUtc - nowUtc;
-  if (diff < 0) return "LIVE";
+  if (diff < 0) return "Tip-off soon";
 
   long hours = diff / 3600;
   long minutes = (diff % 3600) / 60;
@@ -142,20 +167,23 @@ static long secondsUntil(const String& iso) {
 }
 
 static String makePstDateString();
-static String scanDukeGamesForDate(const String& dateKey, String& scoreLine1, String& scoreDetail, bool& foundLiveOrFinal, String& opponent);
-static bool findNextDukeGame(String& gameStartIso, String& opponent);
 
 // "vs UNC" / "@ UVA", with the ESPN abbreviation trimmed only as far as needed
 // for matchupLine() to fit on one 16-char LCD row.
 static String opponentLabel(const String& abbr, bool away) {
   if (abbr.length() == 0) return "";
   String prefix = away ? "@ " : "vs ";
-  int room = 16 - 5 - (int)prefix.length();  // 5 = "DUKE "
-  return prefix + abbr.substring(0, room);
+  int room = 16 - (int)strlen(MY_TEAM.label) - 1 - (int)prefix.length();
+  return prefix + abbr.substring(0, room > 0 ? room : 0);
 }
 
 static String matchupLine(const String& opponent) {
-  return opponent.length() > 0 ? "DUKE " + opponent : String("DUKE game");
+  String team = MY_TEAM.label;
+  return opponent.length() > 0 ? team + " " + opponent : team + " game";
+}
+
+static String noGameLine() {
+  return String("No ") + MY_TEAM.label + " game";
 }
 
 static String makePstDateKeyFromUtc(time_t utcEpoch) {
@@ -185,18 +213,28 @@ static bool readBootCache() {
   EEPROM.begin(sizeof(BootCache));
   EEPROM.get(0, bootCache);
   EEPROM.end();
-  return bootCache.magic == BOOT_CACHE_MAGIC;
+  if (bootCache.magic != BOOT_CACHE_MAGIC) {
+    memset(&bootCache, 0, sizeof(bootCache));
+    return false;
+  }
+  bootCache.eventId[sizeof(bootCache.eventId) - 1] = '\0';
+  bootCache.startIso[sizeof(bootCache.startIso) - 1] = '\0';
+  bootCache.opponent[sizeof(bootCache.opponent) - 1] = '\0';
+  bootCache.teamId[sizeof(bootCache.teamId) - 1] = '\0';
+  bootCache.lastConnectedSsid[sizeof(bootCache.lastConnectedSsid) - 1] = '\0';
+  return true;
 }
 
-static void writeBootCache(const String& dateKey, const String& ssid, const String& gameStartIso) {
+// Persists the last WiFi network and the tracked game so a reboot can show
+// the countdown without waiting on ESPN.
+static void writeBootCache(const String& ssid) {
   memset(&bootCache, 0, sizeof(bootCache));
   bootCache.magic = BOOT_CACHE_MAGIC;
-  strlcpy(bootCache.lastDateKey, dateKey.c_str(), sizeof(bootCache.lastDateKey));
+  strlcpy(bootCache.teamId, MY_TEAM.espnId, sizeof(bootCache.teamId));
   strlcpy(bootCache.lastConnectedSsid, ssid.c_str(), sizeof(bootCache.lastConnectedSsid));
-  strlcpy(bootCache.lastGameStartIso, gameStartIso.c_str(), sizeof(bootCache.lastGameStartIso));
-  if (gameStartIso.length() > 0) {
-    strlcpy(bootCache.lastOpponent, cachedOpponent.c_str(), sizeof(bootCache.lastOpponent));
-  }
+  strlcpy(bootCache.eventId, g_game.eventId.c_str(), sizeof(bootCache.eventId));
+  strlcpy(bootCache.startIso, g_game.startIso.c_str(), sizeof(bootCache.startIso));
+  strlcpy(bootCache.opponent, g_game.opponent.c_str(), sizeof(bootCache.opponent));
   EEPROM.begin(sizeof(BootCache));
   EEPROM.put(0, bootCache);
   EEPROM.commit();
@@ -318,7 +356,7 @@ static bool pollWifiConnect() {
     String connectedSsid = WiFi.SSID();
     Serial.print("Connected to ");
     Serial.println(connectedSsid);
-    writeBootCache(makePstDateString(), connectedSsid, cachedGameStartIso);
+    writeBootCache(connectedSsid);
     g_wifiActive = false;
     return true;
   }
@@ -340,11 +378,22 @@ static bool pollWifiConnect() {
   return false;
 }
 
-static void refreshCountdownDisplay() {
-  if (cachedGameStartIso.length() == 0) return;
+static bool isUpcoming(const Game& g) {
+  return g.eventId.length() > 0 && g.state != "in" && g.state != "post";
+}
 
-  String line1 = matchupLine(cachedOpponent);
-  String line2 = formatCountdown(cachedGameStartIso);
+// Final 5 minutes of the 2nd half (or any OT) with a margin within 15.
+static bool isCloseLateGame(const Game& g) {
+  return g.state == "in" && g.period >= 2 && g.clockSecs >= 0 &&
+         g.clockSecs <= CLOSE_GAME_CLOCK_SECS && g.margin >= 0 &&
+         g.margin <= CLOSE_GAME_MARGIN;
+}
+
+static void refreshCountdownDisplay() {
+  if (!isUpcoming(g_game)) return;
+
+  String line1 = matchupLine(g_game.opponent);
+  String line2 = formatCountdown(g_game.startIso);
 
   if (line1 != g_lcdLine1) {
     showOnLcd(line1, line2);
@@ -362,17 +411,31 @@ static void refreshCountdownDisplay() {
 }
 
 // Keeps the countdown ticking locally from the last known game start time.
-// Called from loop() and while a slow ESPN download is being parsed.
+// Called from loop() and while an ESPN download is being parsed.
 static void tickCountdown() {
-  if (cachedGameStartIso.length() == 0) return;
+  if (!isUpcoming(g_game)) return;
   unsigned long nowMs = millis();
   if (nowMs - lastCountdownRefreshMs < COUNTDOWN_TICK_MS) return;
   lastCountdownRefreshMs = nowMs;
   refreshCountdownDisplay();
 }
 
-// Stream wrapper that keeps the countdown ticking while ArduinoJson reads a
-// large HTTPS response, which can otherwise block loop() for many seconds.
+static void showNoGame() {
+  showOnLcd(noGameLine(), String("today v") + String(FIRMWARE_VERSION));
+}
+
+static void showGame() {
+  if (g_game.eventId.length() == 0) {
+    showNoGame();
+  } else if (isUpcoming(g_game)) {
+    showOnLcd(matchupLine(g_game.opponent), formatCountdown(g_game.startIso));
+  } else {
+    showOnLcd(g_game.scoreLine, g_game.detail);
+  }
+}
+
+// Stream wrapper that keeps the countdown ticking while ArduinoJson reads an
+// HTTPS response, which can otherwise block loop() for seconds.
 class CountdownTickingStream : public Stream {
  public:
   explicit CountdownTickingStream(Stream& inner) : inner_(inner) {}
@@ -392,121 +455,34 @@ class CountdownTickingStream : public Stream {
   Stream& inner_;
 };
 
-void fetchScore() {
-  String todayKey = makePstDateString();
-  String scoreLine1, scoreDetail;
-  bool foundLiveOrFinal = false;
-  String upcomingOpponent;
-  String upcomingIso = scanDukeGamesForDate(todayKey, scoreLine1, scoreDetail, foundLiveOrFinal, upcomingOpponent);
+// ---------------------------------------------------------------------------
+// ESPN access. Every request is scoped to MY_TEAM (or one of its games):
+//   teams/{id}            ~16 KB  next not-yet-started game ("nextEvent")
+//   scoreboard/{eventId}  ~14 KB  live/final score + clock for one game
+//   teams/{id}/schedule  ~350 KB  whole season; only when nothing is known
+// ---------------------------------------------------------------------------
 
-  Serial.printf("requestDate=%s\n", todayKey.c_str());
-
-  // An upcoming Duke game today takes priority over any cached future game.
-  if (upcomingIso.length() > 0) {
-    cachedGameStartIso = upcomingIso;
-    cachedOpponent = upcomingOpponent;
-    writeBootCache(todayKey, WiFi.SSID(), cachedGameStartIso);
-    long secs = secondsUntil(upcomingIso);
-    if (secs > 0 && secs <= 120) {
-      preGameHype(lcd);
-    }
-    showOnLcd(matchupLine(cachedOpponent), formatCountdown(upcomingIso));
-    return;
-  }
-
-  // A Duke game today that is live or final — show the score.
-  if (foundLiveOrFinal) {
-    writeBootCache(todayKey, WiFi.SSID(), "");
-    cachedGameStartIso = "";
-    showOnLcd(scoreLine1, scoreDetail);
-    return;
-  }
-
-  // Nothing from today's scoreboard (or that fetch failed). Drop a cached game
-  // whose start time has passed, then consult the team schedule when nothing
-  // is cached or the cache is due for re-validation.
-  if (cachedGameStartIso.length() > 0 && secondsUntil(cachedGameStartIso) < 0) {
-    cachedGameStartIso = "";
-  }
-
-  bool scheduleDue = lastScheduleCheckMs == 0 ||
-                     millis() - lastScheduleCheckMs >= SCHEDULE_RECHECK_INTERVAL_MS;
-  if (cachedGameStartIso.length() > 0 && !scheduleDue) {
-    refreshCountdownDisplay();
-    return;
-  }
-
-  String nextIso, nextOpponent;
-  if (!findNextDukeGame(nextIso, nextOpponent)) {
-    // Fetch failed: keep whatever we had rather than guessing.
-    if (cachedGameStartIso.length() > 0) {
-      refreshCountdownDisplay();
-      return;
-    }
-    showOnLcd("No Duke game", String("today v") + String(FIRMWARE_VERSION));
-    return;
-  }
-  lastScheduleCheckMs = millis();
-
-  if (nextIso.length() > 0) {
-    cachedGameStartIso = nextIso;
-    cachedOpponent = nextOpponent;
-    writeBootCache(todayKey, WiFi.SSID(), cachedGameStartIso);
-    refreshCountdownDisplay();
-    return;
-  }
-
-  cachedGameStartIso = "";
-  writeBootCache(todayKey, WiFi.SSID(), "");
-  showOnLcd("No Duke game", String("today v") + String(FIRMWARE_VERSION));
-}
-
-
-static String scanDukeGamesForDate(const String& dateKey,
-                                   String& scoreLine1,
-                                   String& scoreDetail,
-                                   bool& foundLiveOrFinal,
-                                   String& opponent) {
+// GETs an ESPN path and parses it through `filter`. Returns false on any
+// network, HTTP or JSON error.
+static bool fetchEspnJson(const String& path, JsonDocument& filter, JsonDocument& doc) {
   WiFiClientSecure client;
   client.setInsecure();
   client.setBufferSizes(1024, 512);
 
-  scoreLine1 = "";
-  scoreDetail = "";
-  foundLiveOrFinal = false;
-  opponent = "";
-
   if (!client.connect(HOST, 443)) {
-    Serial.println("Connect fail (scan)");
-    return "";
+    Serial.printf("Connect fail: %s\n", path.c_str());
+    return false;
   }
 
-  String requestPath = String(PATH) + dateKey;
-  client.print(String("GET ") + requestPath + " HTTP/1.0\r\nHost: " + HOST +
+  client.print(String("GET ") + LEAGUE_PATH + path + " HTTP/1.0\r\nHost: " + HOST +
                "\r\nConnection: close\r\n\r\n");
-  if (!client.find("\r\n\r\n")) {
-    Serial.println("Bad response (scan)");
+  String statusLine = client.readStringUntil('\n');
+  if (statusLine.indexOf(" 200") < 0 || !client.find("\r\n\r\n")) {
+    Serial.printf("Bad response for %s: %s\n", path.c_str(), statusLine.c_str());
     client.stop();
-    return "";
+    return false;
   }
 
-  JsonDocument filter;
-  JsonObject f = filter["events"][0].to<JsonObject>();
-  f["status"]["type"]["state"] = true;
-  f["status"]["type"]["shortDetail"] = true;
-  f["competitions"][0]["startDate"] = true;
-  f["competitions"][0]["neutralSite"] = true;
-  JsonArray comps = f["competitions"][0]["competitors"].to<JsonArray>();
-  JsonObject comp0 = comps.add<JsonObject>();
-  comp0["score"] = true;
-  comp0["homeAway"] = true;
-  comp0["team"]["abbreviation"] = true;
-  JsonObject comp1 = comps.add<JsonObject>();
-  comp1["score"] = true;
-  comp1["homeAway"] = true;
-  comp1["team"]["abbreviation"] = true;
-
-  JsonDocument doc;
   CountdownTickingStream tickingClient(client);
   DeserializationError err = deserializeJson(
     doc,
@@ -515,147 +491,194 @@ static String scanDukeGamesForDate(const String& dateKey,
     DeserializationOption::NestingLimit(32));
   client.stop();
   if (err) {
-    Serial.printf("JSON err (scan): %s\n", err.c_str());
-    return "";
-  }
-
-  String upcomingIso = "";
-
-  for (JsonObject ev : doc["events"].as<JsonArray>()) {
-    JsonArray evComps = ev["competitions"][0]["competitors"];
-    String gameStart = ev["competitions"][0]["startDate"] | "";
-
-    bool hasDuke = false;
-    for (JsonObject c : evComps) {
-      if (String(c["team"]["abbreviation"] | "") == TEAM) {
-        hasDuke = true;
-        break;
-      }
-    }
-    if (!hasDuke) {
-      continue;
-    }
-
-    String status = ev["status"]["type"]["state"] | "";
-    Serial.printf("dukeEvent date=%s state=%s start=%s\n", dateKey.c_str(), status.c_str(), gameStart.c_str());
-
-    if (status == "pre" || status == "scheduled") {
-      if (upcomingIso.length() == 0) {
-        upcomingIso = gameStart;
-        bool dukeAway = false;
-        String oppAbbr = "";
-        for (JsonObject c : evComps) {
-          String abbr = c["team"]["abbreviation"] | "";
-          if (abbr == TEAM) {
-            dukeAway = String(c["homeAway"] | "") == "away";
-          } else {
-            oppAbbr = abbr;
-          }
-        }
-        bool neutral = ev["competitions"][0]["neutralSite"] | false;
-        opponent = opponentLabel(oppAbbr, dukeAway && !neutral);
-      }
-      continue;
-    }
-
-    // Live or final Duke game today — capture score summary (first one).
-    if (!foundLiveOrFinal) {
-      foundLiveOrFinal = true;
-      String line1 = "";
-      for (JsonObject c : evComps) {
-        if (line1.length()) {
-          line1 += " ";
-        }
-        line1 += String(c["team"]["abbreviation"] | "?") + " " + String(c["score"] | "0");
-      }
-      scoreLine1 = line1;
-      scoreDetail = ev["status"]["type"]["shortDetail"] | "";
-    }
-  }
-
-  return upcomingIso;
-}
-
-// Returns false on network/parse failure. On success, gameStartIso is the
-// earliest not-yet-started Duke game (empty if none remain this season).
-static bool findNextDukeGame(String& gameStartIso, String& opponent) {
-  gameStartIso = "";
-  opponent = "";
-
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setBufferSizes(1024, 512);
-
-  if (!client.connect(HOST, 443)) {
-    Serial.println("Connect fail (schedule)");
+    Serial.printf("JSON err for %s: %s\n", path.c_str(), err.c_str());
     return false;
   }
-
-  client.print(String("GET ") + SCHEDULE_PATH + " HTTP/1.0\r\nHost: " + HOST +
-               "\r\nConnection: close\r\n\r\n");
-  if (!client.find("\r\n\r\n")) {
-    Serial.println("Bad response (schedule)");
-    client.stop();
-    return false;
-  }
-
-  JsonDocument filter;
-  JsonObject f = filter["events"][0].to<JsonObject>();
-  f["date"] = true;
-  JsonObject fc = f["competitions"][0].to<JsonObject>();
-  fc["neutralSite"] = true;
-  fc["status"]["type"]["state"] = true;
-  JsonObject fcomp = fc["competitors"][0].to<JsonObject>();
-  fcomp["homeAway"] = true;
-  fcomp["team"]["abbreviation"] = true;
-
-  JsonDocument doc;
-  CountdownTickingStream tickingClient(client);
-  DeserializationError err = deserializeJson(
-    doc,
-    tickingClient,
-    DeserializationOption::Filter(filter),
-    DeserializationOption::NestingLimit(32));
-  client.stop();
-  if (err) {
-    Serial.printf("JSON err (schedule): %s\n", err.c_str());
-    return false;
-  }
-
-  time_t bestStart = 0;
-  for (JsonObject ev : doc["events"].as<JsonArray>()) {
-    JsonObject comp = ev["competitions"][0];
-    String state = comp["status"]["type"]["state"] | "";
-    if (state != "pre") {
-      continue;
-    }
-    String iso = ev["date"] | "";
-    time_t start = parseIsoUtc(iso);
-    if (start == 0 || (bestStart != 0 && start >= bestStart)) {
-      continue;
-    }
-
-    bool dukeAway = false;
-    String oppAbbr = "";
-    for (JsonObject c : comp["competitors"].as<JsonArray>()) {
-      String abbr = c["team"]["abbreviation"] | "";
-      if (abbr == TEAM) {
-        dukeAway = String(c["homeAway"] | "") == "away";
-      } else {
-        oppAbbr = abbr;
-      }
-    }
-    bool neutral = comp["neutralSite"] | false;
-
-    bestStart = start;
-    gameStartIso = iso;
-    opponent = opponentLabel(oppAbbr, dukeAway && !neutral);
-  }
-
-  Serial.printf("nextDukeGame start=%s opp=%s\n", gameStartIso.c_str(), opponent.c_str());
   return true;
 }
 
+// Fields of an ESPN event object that parseEvent() reads. The same shape is
+// used by teams/{id} nextEvent, teams/{id}/schedule events and scoreboard/{id}.
+static void addEventFilter(JsonObject f) {
+  f["id"] = true;
+  f["date"] = true;
+  JsonObject comp = f["competitions"][0].to<JsonObject>();
+  comp["neutralSite"] = true;
+  comp["status"]["type"]["state"] = true;
+  comp["status"]["type"]["shortDetail"] = true;
+  comp["status"]["period"] = true;
+  comp["status"]["clock"] = true;
+  JsonObject competitor = comp["competitors"][0].to<JsonObject>();
+  competitor["id"] = true;
+  competitor["homeAway"] = true;
+  competitor["score"] = true;
+  competitor["team"]["abbreviation"] = true;
+}
+
+static Game parseEvent(JsonObject ev) {
+  Game g;
+  g.eventId = ev["id"] | "";
+  g.startIso = ev["date"] | "";
+  JsonObject comp = ev["competitions"][0];
+  g.state = comp["status"]["type"]["state"] | "";
+  g.detail = comp["status"]["type"]["shortDetail"] | "";
+  g.period = comp["status"]["period"] | 0;
+  g.clockSecs = (int)(comp["status"]["clock"] | -1.0f);
+  bool neutral = comp["neutralSite"] | false;
+
+  bool away = false;
+  String oppAbbr = "?";
+  String myScore = "0";
+  String oppScore = "0";
+  for (JsonObject c : comp["competitors"].as<JsonArray>()) {
+    // scoreboard/{id} gives "45"; the schedule gives {"displayValue": "45"}.
+    JsonVariant s = c["score"];
+    String score = s.is<JsonObject>() ? String(s["displayValue"] | "0") : String(s | "0");
+    if (String(c["id"] | "") == MY_TEAM.espnId) {
+      away = String(c["homeAway"] | "") == "away";
+      myScore = score;
+    } else {
+      oppAbbr = c["team"]["abbreviation"] | "?";
+      oppScore = score;
+    }
+  }
+
+  g.opponent = opponentLabel(oppAbbr, away && !neutral);
+  g.margin = abs(myScore.toInt() - oppScore.toInt());
+  // "DUKE 45 UNC 39", trimming only the opponent abbreviation to fit 16 chars.
+  String mine = String(MY_TEAM.label) + " " + myScore + " ";
+  int room = 16 - (int)mine.length() - 1 - (int)oppScore.length();
+  g.scoreLine = mine + oppAbbr.substring(0, room > 1 ? room : 1) + " " + oppScore;
+  return g;
+}
+
+// Current status/score of one game.
+static bool fetchGame(const String& eventId, Game& out) {
+  JsonDocument filter;
+  addEventFilter(filter.to<JsonObject>());
+  JsonDocument doc;
+  // Unique query string skips ESPN's CDN cache, which can lag the game clock.
+  String path = String("/scoreboard/") + eventId + "?_=" + String((unsigned long)time(nullptr));
+  if (!fetchEspnJson(path, filter, doc)) return false;
+  Game g = parseEvent(doc.as<JsonObject>());
+  if (g.eventId.length() == 0) return false;
+  out = g;
+  return true;
+}
+
+// The team's next game that has not started. ESPN drops a game from nextEvent
+// once it tips off, so this can't be used to find a game in progress.
+// out.eventId is empty when no games remain.
+static bool fetchNextGame(Game& out) {
+  JsonDocument filter;
+  addEventFilter(filter["team"]["nextEvent"][0].to<JsonObject>());
+  JsonDocument doc;
+  if (!fetchEspnJson(String("/teams/") + MY_TEAM.espnId, filter, doc)) return false;
+  out = Game();
+  for (JsonObject ev : doc["team"]["nextEvent"].as<JsonArray>()) {
+    Game g = parseEvent(ev);
+    if (g.state == "pre") {
+      out = g;
+      break;
+    }
+  }
+  return true;
+}
+
+// Picks a game in progress, else one that finished today (PST), else the
+// next upcoming game. Used only when nothing is known (e.g. first boot).
+static bool fetchCurrentGameFromSchedule(Game& out) {
+  JsonDocument filter;
+  addEventFilter(filter["events"][0].to<JsonObject>());
+  JsonDocument doc;
+  if (!fetchEspnJson(String("/teams/") + MY_TEAM.espnId + "/schedule", filter, doc)) {
+    return false;
+  }
+
+  String todayKey = makePstDateString();
+  Game finishedToday, next;
+  time_t nextStart = 0;
+  for (JsonObject ev : doc["events"].as<JsonArray>()) {
+    Game g = parseEvent(ev);
+    time_t start = parseIsoUtc(g.startIso);
+    if (g.state == "in") {
+      out = g;
+      return true;
+    }
+    if (g.state == "post" && makePstDateKeyFromUtc(start) == todayKey) {
+      finishedToday = g;
+    } else if (g.state == "pre" && start != 0 && (nextStart == 0 || start < nextStart)) {
+      next = g;
+      nextStart = start;
+    }
+  }
+  out = finishedToday.eventId.length() > 0 ? finishedToday : next;
+  return true;
+}
+
+// Called every GAME_START_CHECK_INTERVAL_MS. Downloads only what the current
+// phase needs:
+//   upcoming game  -> nothing (countdown is local); teams/{id} hourly
+//   game started   -> scoreboard/{eventId} every call until it's final
+//   game final     -> nothing until the next PST day, then teams/{id}
+//   nothing known  -> teams/{id}/schedule
+void fetchScore() {
+  unsigned long nowMs = millis();
+
+  if (g_game.eventId.length() == 0) {
+    if (lastNextGameCheckMs != 0 && nowMs - lastNextGameCheckMs < NO_GAME_RECHECK_INTERVAL_MS) {
+      return;
+    }
+    Game found;
+    if (!fetchCurrentGameFromSchedule(found)) {
+      showNoGame();
+      return;
+    }
+    lastNextGameCheckMs = nowMs;
+    g_game = found;
+    writeBootCache(WiFi.SSID());
+  }
+
+  if (isUpcoming(g_game) && secondsUntil(g_game.startIso) > 0) {
+    if (lastNextGameCheckMs == 0 || nowMs - lastNextGameCheckMs >= NEXT_GAME_RECHECK_INTERVAL_MS) {
+      Game next;
+      if (fetchNextGame(next)) {
+        lastNextGameCheckMs = nowMs;
+        if (next.eventId.length() > 0 &&
+            (next.eventId != g_game.eventId || next.startIso != g_game.startIso)) {
+          g_game = next;
+          writeBootCache(WiFi.SSID());
+        }
+      }
+    }
+    long secs = secondsUntil(g_game.startIso);
+    if (secs > 0 && secs <= 120) {
+      preGameHype(lcd);
+    }
+  } else if (g_game.state != "post") {
+    // Start time reached (or state unknown after a reboot): poll this game.
+    Game latest;
+    if (fetchGame(g_game.eventId, latest)) {
+      g_game = latest;
+    }
+  }
+
+  if (g_game.state == "post" &&
+      makePstDateKeyFromUtc(parseIsoUtc(g_game.startIso)) < makePstDateString()) {
+    // Yesterday's final: move on to the next game.
+    Game next;
+    if (fetchNextGame(next)) {
+      lastNextGameCheckMs = nowMs;
+      g_game = next;
+      writeBootCache(WiFi.SSID());
+    }
+  }
+
+  Serial.printf("game id=%s state=%s start=%s %s | %s\n", g_game.eventId.c_str(),
+                g_game.state.c_str(), g_game.startIso.c_str(), g_game.scoreLine.c_str(),
+                g_game.detail.c_str());
+  showGame();
+}
 
 
 // Very simple semver compare (handles tags like "v1.2.3").
@@ -868,12 +891,13 @@ void setup() {
   }
   wifiDebug::showNtpResult();
 
-  String todayKey = makePstDateString();
-  if (bootCache.lastDateKey[0] != '\0' && String(bootCache.lastDateKey) == todayKey &&
-      bootCache.lastGameStartIso[0] != '\0') {
-    cachedGameStartIso = String(bootCache.lastGameStartIso);
-    cachedOpponent = String(bootCache.lastOpponent);
-    refreshCountdownDisplay();
+  if (bootCache.magic == BOOT_CACHE_MAGIC && String(bootCache.teamId) == MY_TEAM.espnId &&
+      bootCache.eventId[0] != '\0') {
+    // Show the cached game right away; loop() then verifies it with ESPN.
+    g_game.eventId = bootCache.eventId;
+    g_game.startIso = bootCache.startIso;
+    g_game.opponent = bootCache.opponent;
+    showGame();
   } else {
     fetchScore();
   }
@@ -898,24 +922,26 @@ void loop() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    unsigned long checkIntervalMs = isCloseLateGame(g_game) ? CLOSE_GAME_CHECK_INTERVAL_MS
+                                                            : GAME_START_CHECK_INTERVAL_MS;
     if (lastGameStartCheckMs == 0 ||
-        nowMs - lastGameStartCheckMs >= GAME_START_CHECK_INTERVAL_MS) {
+        nowMs - lastGameStartCheckMs >= checkIntervalMs) {
       lastGameStartCheckMs = nowMs;
       fetchScore();
     }
 
     tickCountdown();
 
-    // When there's no Duke game today, cycle through all three hype
+    // When there's no game to show, cycle through all three hype
     // animations (DUKE -> DDMF -> GTHC) every 120 seconds, then restore
-    // the "No Duke game" message.
-    if (cachedGameStartIso.length() == 0 &&
+    // the "No game" message.
+    if (g_game.eventId.length() == 0 &&
         nowMs - lastNoGameHypeMs >= NO_GAME_HYPE_INTERVAL_MS) {
       lastNoGameHypeMs = nowMs;
       preGameHype(lcd);
       preGameHype(lcd);
       preGameHype(lcd);
-      showOnLcd("No Duke game", String("today v") + String(FIRMWARE_VERSION));
+      showNoGame();
     }
 
     // Periodic OTA update check (hourly).
