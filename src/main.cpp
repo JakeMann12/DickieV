@@ -32,6 +32,8 @@ const int CLOSE_GAME_MARGIN = 15;
 const unsigned long NEXT_GAME_RECHECK_INTERVAL_MS = 60UL * 60UL * 1000UL;
 // How often to look again when the team has no games left on the schedule.
 const unsigned long NO_GAME_RECHECK_INTERVAL_MS = 6UL * 60UL * 60UL * 1000UL;
+// A game this long past its start that ESPN can't return is dropped.
+const long STALE_GAME_SECS = 6L * 60L * 60L;
 // How often the countdown text is re-evaluated. The LCD is only rewritten when
 // the displayed text actually changes (i.e. once per second).
 const unsigned long COUNTDOWN_TICK_MS = 200UL;
@@ -468,6 +470,8 @@ static bool fetchEspnJson(const String& path, JsonDocument& filter, JsonDocument
   WiFiClientSecure client;
   client.setInsecure();
   client.setBufferSizes(1024, 512);
+  // Default 1 s stream timeout aborts large responses on brief network stalls.
+  client.setTimeout(10000);
 
   if (!client.connect(HOST, 443)) {
     Serial.printf("Connect fail: %s\n", path.c_str());
@@ -660,6 +664,11 @@ void fetchScore() {
     Game latest;
     if (fetchGame(g_game.eventId, latest)) {
       g_game = latest;
+    } else if (secondsUntil(g_game.startIso) < -STALE_GAME_SECS) {
+      // Long past start and ESPN won't return it (event removed or id
+      // changed): forget it so the next call rediscovers from the schedule.
+      g_game = Game();
+      lastNextGameCheckMs = 0;
     }
   }
 
@@ -834,6 +843,13 @@ void setup() {
   initDunkSprites(lcd);
 
   readBootCache();
+  if (bootCache.magic == BOOT_CACHE_MAGIC && String(bootCache.teamId) == MY_TEAM.espnId &&
+      bootCache.eventId[0] != '\0') {
+    // Load before WiFi connects: pollWifiConnect() rewrites the cache from g_game.
+    g_game.eventId = bootCache.eventId;
+    g_game.startIso = bootCache.startIso;
+    g_game.opponent = bootCache.opponent;
+  }
   loadWifiNetworks();
 
 #if !WIFI_DEBUG_LCD
@@ -891,12 +907,8 @@ void setup() {
   }
   wifiDebug::showNtpResult();
 
-  if (bootCache.magic == BOOT_CACHE_MAGIC && String(bootCache.teamId) == MY_TEAM.espnId &&
-      bootCache.eventId[0] != '\0') {
+  if (g_game.eventId.length() > 0) {
     // Show the cached game right away; loop() then verifies it with ESPN.
-    g_game.eventId = bootCache.eventId;
-    g_game.startIso = bootCache.startIso;
-    g_game.opponent = bootCache.opponent;
     showGame();
   } else {
     fetchScore();

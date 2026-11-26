@@ -5,7 +5,7 @@ Read this whole file before you change anything. It is short on purpose.
 ## 1. What this project is
 
 DickieV is firmware for an ESP8266 (ESP-12E) board with a 16x2 LCD.
-It pulls Duke men's basketball games from the ESPN API over WiFi and shows:
+It pulls one team's men's basketball games (Duke by default, set by `MY_TEAM`) from the ESPN API over WiFi and shows:
 - a live score during a game
 - a ticking countdown (`T-HH:MM:SS`) before a game
 - hype animations when there is no game today
@@ -65,19 +65,21 @@ Line numbers are approximate. Search for the name instead of trusting the number
 
 | Name | ~Line | Purpose |
 |---|---|---|
-| Settings block | 13-80 | `MY_TEAM`, ESPN `HOST`/`LEAGUE_PATH`, timing intervals, `FIRMWARE_VERSION`, `BUTTON_PIN`, GitHub owner/repo, `lcd` pins |
-| `showOnLcd(l1, l2)` | 81 | Clears the LCD and prints two lines. Each line is cut to 16 chars. |
-| `parseIsoUtc` / `formatCountdown` | 93 / 109 | ISO time to `time_t`; builds `T-HH:MM:SS` (`Tip-off soon` once start time passes) |
-| `readBootCache` / `writeBootCache` | 162 / 169 | Saves the tracked game (event id, start, opponent) and last SSID to EEPROM so a reboot can show it before ESPN answers |
-| `loadWifiNetworks` | 195 | Reads WiFi networks baked in at build time |
-| `beginWifiConnect` / `pollWifiConnect` | 333 / 367 | Non-blocking WiFi connect that tries each network in turn |
-| `refreshCountdownDisplay` / `tickCountdown` | 402 / 425 | Redraws the countdown only when the text changes (no flicker) |
-| `fetchScore()` | 454 | Calls ESPN, shows score or countdown, updates `cachedGameStartIso` |
-| `scanDukeGamesForDate` | 513 | Downloads and parses one day of ESPN games |
-| `findNextDukeGame` | 639 | Looks up to 14 days ahead for the next game |
-| `checkForUpdate()` | 725 | OTA: checks the latest GitHub release and flashes it if newer |
-| `setup()` | 793 | LCD init, boot animations, WiFi, NTP time, first fetch |
-| `loop()` | 886 | Button (D4) = check for update; ESPN refresh; countdown tick; hype animations; hourly OTA check |
+| Settings block | 14-95 | `MY_TEAM`, ESPN `HOST`/`LEAGUE_PATH`, timing intervals, `FIRMWARE_VERSION`, `BUTTON_PIN`, GitHub owner/repo, `lcd` pins |
+| `showOnLcd(l1, l2)` | 121 | Clears the LCD and prints two lines. Each line is cut to 16 chars. |
+| `parseIsoUtc` / `formatCountdown` | 133 / 149 | ISO time to `time_t`; builds `T-HH:MM:SS` (`Tip-off soon` once start time passes) |
+| `readBootCache` / `writeBootCache` | 214 / 232 | Saves the tracked game (event id, start, opponent) and last SSID to EEPROM. `setup()` loads it into `g_game` before WiFi connects so a reboot shows it before ESPN answers. |
+| `loadWifiNetworks` | 257 | Reads WiFi networks baked in at build time |
+| `beginWifiConnect` / `pollWifiConnect` | 318 / 352 | Non-blocking WiFi connect that tries each network in turn |
+| `isUpcoming` / `isCloseLateGame` | 383 / 388 | Game-phase checks used for display and poll rate |
+| `refreshCountdownDisplay` / `tickCountdown` | 394 / 417 | Redraws the countdown only when the text changes (no flicker) |
+| `showGame` / `showNoGame` | 429 / 425 | Draws `g_game` (countdown, or score + clock/Final) |
+| `fetchEspnJson` / `parseEvent` | 469 / 522 | Shared HTTPS + filtered-JSON fetch; parses any ESPN event object into a `Game` |
+| `fetchGame` / `fetchNextGame` / `fetchCurrentGameFromSchedule` | 560 / 576 / 594 | `scoreboard/{eventId}` (~14 KB, live score), `teams/{id}` nextEvent (~16 KB), `teams/{id}/schedule` (~350 KB, only when nothing is known) |
+| `fetchScore()` | 629 | Polls by game phase: upcoming = local countdown + hourly `fetchNextGame`; started = `fetchGame` each call; final = nothing until next PST day |
+| `checkForUpdate()` | 764 | OTA: checks the latest GitHub release and flashes it if newer |
+| `setup()` | 832 | LCD init, boot animations, WiFi, NTP time, first fetch |
+| `loop()` | 918 | Button (D4) = check for update; ESPN refresh (5 s in close late games, else 30 s); countdown tick; hype animations; hourly OTA check |
 
 ### Key settings (top of `src/main.cpp`)
 
@@ -87,6 +89,7 @@ Line numbers are approximate. Search for the name instead of trusting the number
 | `CLOSE_GAME_CHECK_INTERVAL_MS` | `5UL * 1000UL` (5 s) | Poll rate when `isCloseLateGame()`: period >= 2, clock <= `CLOSE_GAME_CLOCK_SECS` (5 min), margin <= `CLOSE_GAME_MARGIN` (15) |
 | `NEXT_GAME_RECHECK_INTERVAL_MS` | `60UL * 60UL * 1000UL` | How often an upcoming game is re-validated via `teams/{id}` |
 | `NO_GAME_RECHECK_INTERVAL_MS` | `6UL * 60UL * 60UL * 1000UL` | Re-check interval when no games remain |
+| `STALE_GAME_SECS` | `6L * 60L * 60L` | Drop a game ESPN can't return once it is this far past its start |
 | `GAME_START_CHECK_INTERVAL_MS` | `30UL * 1000UL` (30 s) | How often `fetchScore()` runs (it only downloads when the game phase needs it) |
 | `COUNTDOWN_TICK_MS` | `200UL` | How often the countdown text is checked. The LCD changes once per second. |
 | `NO_GAME_HYPE_INTERVAL_MS` | `120UL * 1000UL` | Hype animation cycle when there is no game |
