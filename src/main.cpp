@@ -25,7 +25,7 @@ static const Team MY_TEAM = {"150", "DUKE"};
 const unsigned long GAME_START_CHECK_INTERVAL_MS = 30UL * 1000UL;
 // Faster polling for crunch time: final 5 minutes of the 2nd half or any
 // overtime, with the margin within 15 points.
-const unsigned long CLOSE_GAME_CHECK_INTERVAL_MS = 10UL * 1000UL;
+const unsigned long CLOSE_GAME_CHECK_INTERVAL_MS = 5UL * 1000UL;
 const int CLOSE_GAME_CLOCK_SECS = 5 * 60;
 const int CLOSE_GAME_MARGIN = 15;
 // How often an upcoming game is re-validated (catches time changes).

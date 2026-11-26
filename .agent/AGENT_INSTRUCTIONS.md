@@ -84,7 +84,7 @@ Line numbers are approximate. Search for the name instead of trusting the number
 | Constant | Current value | Meaning |
 |---|---|---|
 | `MY_TEAM` | `{"150", "DUKE"}` | ESPN numeric team id (from the espn.com team URL) and the LCD label (<= 5 chars) |
-| `CLOSE_GAME_CHECK_INTERVAL_MS` | `10UL * 1000UL` (10 s) | Poll rate when `isCloseLateGame()`: period >= 2, clock <= `CLOSE_GAME_CLOCK_SECS` (5 min), margin <= `CLOSE_GAME_MARGIN` (15) |
+| `CLOSE_GAME_CHECK_INTERVAL_MS` | `5UL * 1000UL` (5 s) | Poll rate when `isCloseLateGame()`: period >= 2, clock <= `CLOSE_GAME_CLOCK_SECS` (5 min), margin <= `CLOSE_GAME_MARGIN` (15) |
 | `NEXT_GAME_RECHECK_INTERVAL_MS` | `60UL * 60UL * 1000UL` | How often an upcoming game is re-validated via `teams/{id}` |
 | `NO_GAME_RECHECK_INTERVAL_MS` | `6UL * 60UL * 60UL * 1000UL` | Re-check interval when no games remain |
 | `GAME_START_CHECK_INTERVAL_MS` | `30UL * 1000UL` (30 s) | How often `fetchScore()` runs (it only downloads when the game phase needs it) |
